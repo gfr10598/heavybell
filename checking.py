@@ -44,7 +44,6 @@ from numpy.typing import NDArray
 import numpy as np
 import matplotlib.pyplot as plt
 import mplcursors  # type: ignore
-from functools import reduce
 import math
 
 
@@ -59,6 +58,10 @@ class Profile:
         self.w_width = abs(w_range[1] - w_range[0]) / 2
         self.w_shape = 1.0
         self.f_shape = 1.0
+        if self.raw_range[0] < 0 or self.raw_range[1] < 0:
+            raise ValueError(f"Invalid range: {self.raw_range[0]} {self.raw_range[1]}")
+        # if self.raw_range[0] < self.raw_range[1]:
+        #     raise ValueError(f"Invalid range: {self.raw_range[0]} {self.raw_range[1]}")
 
     def shape(self, w_shape: float, f_shape: float) -> Self:
         self.w_shape = w_shape
@@ -68,19 +71,70 @@ class Profile:
         self.f_shape = f_shape
         return self
 
+    def theta(self, kappa: float, omega: float) -> float:
+        """
+        Find the angle of the bell at a given angular velocity
+        omega = 2 * np.sqrt(9.81 * self.kinetic(theta) / self.L)
+        kinetic = self.kappa / 2 - self.potential(theta)
+        potential = (1 - np.cos(theta)) / 2
+        kinetic = (self.kappa / 2 - (1 - np.cos(theta)) / 2)
+        w = 2 * np.sqrt(9.81 * (self.kappa / 2 - (1 - np.cos(theta)) / 2) / self.L)
+        (w/2)**2 = 9.81 * (self.kappa / 2 - (1 - np.cos(theta)) / 2) / self.L
+        (w/2)**2 * self.L = 9.81 * (self.kappa / 2 - (1 - np.cos(theta)) / 2)
+        (w/2)**2 * self.L / 9.81 = (self.kappa - (1 - np.cos(theta)))/2
+        2*((w/2)**2 * self.L / 9.81) - self.kappa = - (1 - np.cos(theta))
+        1 - np.cos(theta) = self.kappa - 2*((w/2)**2 * self.L / 9.81)
+        np.cos(theta) = 1 - self.kappa + 2*((w/2)**2 * self.L / 9.81)
+        theta = np.arccos(1 - self.kappa + 2 * ((omega / 2) ** 2 * self.L / 9.81))
+
+        """
+        return np.arccos(1 - kappa + 2 * ((omega / 2) ** 2 * self.L / 9.81))
+
+    def transfer(self, k0: float, k1: float) -> float:
+        """
+        This is trivial!
+        Find the force required to transfer from k0 to k1 with this profile
+        Parameters:
+            k0: initial (larger) kappa
+            k1: final (smaller) kappa
+        """
+        a = self.area()
+        print(f"Area: {a:.6}")
+        f = (k0 - k1) / a
+        sum = 0.0
+        step = 0.01  # error is quadratic in step size
+        k = k0
+        for w in np.arange(
+            min(self.raw_range[0], self.raw_range[1]),
+            max(self.raw_range[0], self.raw_range[1]),
+            step,
+        ):
+            ff = f * self.mag(w + step / 2)
+            sum += ff * step
+            k -= ff * step
+            if k < 0:
+                break
+        print(f"f: {f:.6}, sum: {sum:.6}, k0: {k0:.6}, k1: {k1:.6}  delta: {k0-k:.6}")
+
+        return f
+
     def area(self) -> float:
-        print(
-            "max: ",
-            reduce(
-                lambda a, b: max(a, self.mag(b)),
-                np.arange(self.raw_range[0], self.raw_range[1], 0.01),
-            ),
-        )
-        print("limits: ", self.mag(self.raw_range[0]), self.mag(self.raw_range[1]))
-        return 0.01 * reduce(
-            lambda a, b: a + b * self.mag(b),
-            np.arange(self.raw_range[0], self.raw_range[1], 0.01),
-        )
+        """
+        The area under the curve of the profile, which estimates total energy transferred
+        for an infinitesimal force.
+        For each interval, the work is f * dtheta.  dtheta, though is w * dt, and dt
+        is 0.1 / w.
+        So, we need the sum of f.
+        """
+        sum = 0.0
+        step = 0.01
+        for w in np.arange(
+            min(self.raw_range[0], self.raw_range[1]),
+            max(self.raw_range[0], self.raw_range[1]),
+            step,
+        ):
+            sum += self.mag(w + step / 2)
+        return step * sum
 
     def mag(self, w: float) -> float:
         if self.w_shape != 1.0:
@@ -135,6 +189,38 @@ class Conserving:
     def omega(self, theta: float) -> float:
         return 2 * np.sqrt(9.81 * self.kinetic(theta) / self.L)
 
+    def theta(self, omega: float) -> float:
+        """
+        Find the angle of the bell at a given angular velocity
+        omega = 2 * np.sqrt(9.81 * self.kinetic(theta) / self.L)
+        kinetic = self.kappa / 2 - self.potential(theta)
+        potential = (1 - np.cos(theta)) / 2
+        kinetic = (self.kappa / 2 - (1 - np.cos(theta)) / 2)
+        w = 2 * np.sqrt(9.81 * (self.kappa / 2 - (1 - np.cos(theta)) / 2) / self.L)
+        (w/2)**2 = 9.81 * (self.kappa / 2 - (1 - np.cos(theta)) / 2) / self.L
+        (w/2)**2 * self.L = 9.81 * (self.kappa / 2 - (1 - np.cos(theta)) / 2)
+        (w/2)**2 * self.L / 9.81 = (self.kappa - (1 - np.cos(theta)))/2
+        2*((w/2)**2 * self.L / 9.81) - self.kappa = - (1 - np.cos(theta))
+        1 - np.cos(theta) = self.kappa - 2*((w/2)**2 * self.L / 9.81)
+        np.cos(theta) = 1 - self.kappa + 2*((w/2)**2 * self.L / 9.81)
+        theta = np.arccos(1 - self.kappa + 2 * ((omega / 2) ** 2 * self.L / 9.81))
+
+        """
+
+        cos = 1 - self.kappa + (omega**2) * self.L / 9.81 / 2
+        if cos > 1:
+            print(
+                f"Invalid cos: {cos}  omega: {omega:.3} kappa: {self.kappa:.3} foobar: {(omega**2) * self.L / 9.81 / 2:.8}"
+            )
+            return 0.0
+        if cos < -1:
+            print(
+                f"Invalid cos: {cos}  omega: {omega:.3} kappa: {self.kappa:.3} foobar: {(omega**2) * self.L / 9.81 / 2:.8}"
+            )
+            return np.pi
+
+        return np.arccos(cos) if -1 <= cos <= 1 else 0.0
+
     def period(self, kappa: float) -> float:
         """
         TODO - this isn't producing as accurate a result as expected.
@@ -172,7 +258,6 @@ class Conserving:
         dtheta = 0.1
 
         w0 = self.omega(theta)
-        count = 0
 
         time_vals = []
         theta_vals = []
@@ -182,9 +267,6 @@ class Conserving:
         kappa_vals = []
 
         while w0 > 0 and self.kinetic(theta) > 1e-7:
-            count += 1
-            # if w0 < .1:
-            #   print(t, dt, theta, dtheta,  w0)
             while self.kinetic(theta + dtheta) < 0.98 * self.kinetic(theta):
                 dtheta /= 2
 
@@ -206,6 +288,59 @@ class Conserving:
             dt = dtheta / ((w0 + w1) / 2)
             t += dt
             w0 = w1
+
+        plot_data = (
+            np.array(
+                [
+                    time_vals,
+                    kappa_vals,
+                    potential_vals,
+                    np.degrees(theta_vals),
+                    force_vals,
+                ]
+            )
+            if plot
+            else None
+        )
+        return (2 * t, self.kappa / 2, plot_data)
+
+    def half2(
+        self, kappa: float, f: float, profile: Profile, plot: bool = False
+    ) -> Tuple[float, float, NDArray | None]:
+        """
+        Returns: the period, energy, plot data [t, Kappa, PE, Theta, F]
+        """
+
+        self.set_height(kappa)
+        t = 0.0
+        th0 = 0.0
+
+        w_bdc = self.omega(th0)
+
+        time_vals = []
+        theta_vals = []
+        omega_vals = []
+        force_vals = []
+        potential_vals = []
+        kappa_vals = []
+
+        for w in np.arange(w_bdc, 0, -0.01 * w_bdc):
+            time_vals.append(t)
+            theta_vals.append(th0)
+            omega_vals.append(w)
+            ff = f * profile.mag(w)
+            force_vals.append(ff)
+            potential_vals.append(self.potential(th0))
+            kappa_vals.append(self.kappa)
+
+            w_avg = w - 0.005 * w_bdc
+            ff = f * profile.mag(w_avg)
+            th1 = self.theta(w)  # TODO - interpolate ??
+            dtheta = th1 - th0
+            dt = dtheta / w_avg
+            t += dt
+            self.kappa -= ff * 0.01
+            th0 = th1
 
         plot_data = (
             np.array(
@@ -432,28 +567,32 @@ def hand_and_back() -> None:
 
 
 def main():
+    profile = Profile((4.0, 1.0)).shape(0.5, 0.8)
+    profile.transfer(1.95, 1.90)
+
     cons = Conserving(0.996, 12000.0, 0.0, 0.0)
 
     profiles = [
         Profile((1.0, 4.0)).shape(0.5, 0.8),
         Profile((1.0, 4.0)).shape(0.8, 0.5),
         Profile((1.0, 4.0)).shape(0.9, 0.9),
-        Profile((1.0, 4.0)).shape(0.5, 0.5),
+        Profile((1.0, 4.0)).shape(0.2, 2.0),
+        Profile((1.0, 4.0)).shape(0.5, 2.0),
     ]
     for profile in profiles:
         f = 0.04  # 0.2/profile.area()
-        _, _, data = cons.half(1.99, f, profile, True)
+        _, _, data = cons.half2(1.99, f, profile, True)
         print(
             f"E = [{data[1,0]/2:.4} - {data[1,-1]/2:.4}], Raise = {(data[1,0]-data[1,-1])/2:.4}"
             f"  Period={2*data[0,-1]:.4}  Profile Area:{profile.area():0.4}"
         )
         plt.figure(figsize=(12, 6))
         plt.title("foobar")
-        plt.ylim(0, 1)
+        # plt.ylim(0, 1)
         plt.xlim(data[0][-1], 0)
-        plt.ylabel("Theta (degrees)")
-        plt.plot(data[0], 10 * (1 - data[1] / 2), label="delta E", linewidth=0.5)
-        plt.plot(data[0], data[2], label="height", linewidth=0.5)
+        # plt.ylabel("Theta (degrees)")
+        plt.plot(data[0], 10 * (1 - data[1] / 2), label="10x delta E", linewidth=0.5)
+        plt.plot(data[0], data[2], label="PE", linewidth=0.5)
         plt.plot(data[0], 10 * data[4], label="rope force", linewidth=0.5)
         plt.legend()
         mplcursors.cursor(hover=True)
