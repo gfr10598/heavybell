@@ -41,24 +41,8 @@ Bigger bells would allow a longer handstroke.
 import math
 import numpy as np
 import matplotlib.pyplot as plt
-from scipy.optimize import curve_fit  # type: ignore
 from typing import List, Tuple
 import mplcursors  # type: ignore
-
-
-"""
-When the clapper and bell are not in contact, the equations of motion are:
-θ¨ + g sin(θ) = 0
-and:
-(θ¨ + 𝜙¨)
- + g lb/lc sin(θ + φ)
- +    r/lc sin(𝜙)ω^2 + r/lc cos(𝜙)θ¨ = 0
-Differentiation in these equations is with respect to τ
-
-gfr: When the clapper is lying on the bell, the clapper mass changes the
-effective pendulum length and the neutral angle of the bell by several
-degrees, which is not reflected in the base equations. 𝜙
-"""
 
 
 class Controller:
@@ -86,7 +70,7 @@ class Bell:
     def delta_omega_gravity(self, theta: float, omega: float, dt: float) -> float:
         return -self.g / self.L * (np.sin(theta) + np.cos(theta) * dt * omega / 2) * dt
 
-    def delta_omega_gravity_trap(
+    def delta_omega_gravity_trpz(
         self, theta1: float, theta2: float, dt: float
     ) -> float:
         return -self.g / self.L * (np.sin(theta1) / 2 + np.sin(theta2) / 2) * dt
@@ -111,7 +95,7 @@ class Bell:
         avg_controller = self.controller.angular_acceleration(
             (theta + t) / 2, (omega + o) / 2, odot_2
         )
-        avg_odot = avg_controller + self.delta_omega_gravity_trap(theta, t, dt) / dt
+        avg_odot = avg_controller + self.delta_omega_gravity_trpz(theta, t, dt) / dt
         o = omega + avg_odot * dt
         t = theta + (o + omega) * dt / 2
 
