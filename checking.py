@@ -90,7 +90,7 @@ class Profile:
         """
         return np.arccos(1 - kappa + 2 * ((omega / 2) ** 2 * self.L / 9.81))
 
-    def transfer(self, k0: float, k1: float) -> float:
+    def transfer(self, k_start: float, k_end: float) -> float:
         """
         This is trivial!
         Find the force required to transfer from k0 to k1 with this profile
@@ -98,12 +98,13 @@ class Profile:
             k0: initial (larger) kappa
             k1: final (smaller) kappa
         """
+        assert k_start > k_end, f"Invalid kappa: {k_start} {k_end}"
         a = self.area()
         print(f"Area: {a:.6}")
-        f = (k0 - k1) / a
+        f = (k_start - k_end) / a
         sum = 0.0
         step = 0.01  # error is quadratic in step size
-        k = k0
+        k = k_start
         for w in np.arange(
             min(self.raw_range[0], self.raw_range[1]),
             max(self.raw_range[0], self.raw_range[1]),
@@ -112,9 +113,10 @@ class Profile:
             ff = f * self.mag(w + step / 2)
             sum += ff * step
             k -= ff * step
-            if k < 0:
-                break
-        print(f"f: {f:.6}, sum: {sum:.6}, k0: {k0:.6}, k1: {k1:.6}  delta: {k0-k:.6}")
+            assert k > 0, f"Invalid kappa: {k} {ff} {step} {w}"
+        print(
+            f"f: {f:.6}, sum: {sum:.6}, k0: {k_start:.6}, k1: {k_end:.6}  error: {k_end-k:.6}"
+        )
 
         return f
 
@@ -173,6 +175,10 @@ class Conserving:
         self.rope = rope
         self.kappa = 1.9
 
+    def t0(self) -> float:
+        """The natural low amplitude period of the bell"""
+        return 2 * np.sqrt(self.L / 9.81) * np.pi
+
     def k_rope(self, theta: float) -> float:
         """The approximate energy stored in the rope (K+E)"""
         return 0.0
@@ -209,14 +215,8 @@ class Conserving:
 
         cos = 1 - self.kappa + (omega**2) * self.L / 9.81 / 2
         if cos > 1:
-            print(
-                f"Invalid cos: {cos}  omega: {omega:.3} kappa: {self.kappa:.3} foobar: {(omega**2) * self.L / 9.81 / 2:.8}"
-            )
             return 0.0
         if cos < -1:
-            print(
-                f"Invalid cos: {cos}  omega: {omega:.3} kappa: {self.kappa:.3} foobar: {(omega**2) * self.L / 9.81 / 2:.8}"
-            )
             return np.pi
 
         return np.arccos(cos) if -1 <= cos <= 1 else 0.0
@@ -245,19 +245,20 @@ class Conserving:
         print(t, theta, w0, self.kinetic(0), self.kinetic(theta + dtheta))
         return 2 * t
 
-    def half(
+    def pull(
         self, kappa: float, f: float, profile: Profile, plot: bool = False
     ) -> Tuple[float, float, NDArray | None]:
         """
-        Returns: the period, energy, plot data
+        Computes the application of a pulling profile from peak to BDC.
+        Returns: the half period, energy, plot data [t, Kappa, PE, Theta, F]
         """
 
         self.set_height(kappa)
+        t0 = self.t0()
         t = 0.0
-        theta = 0.0
-        dtheta = 0.1
+        th0 = self.theta(0.0)
 
-        w0 = self.omega(theta)
+        w_bdc = self.omega(0.0)
 
         time_vals = []
         theta_vals = []
@@ -266,65 +267,8 @@ class Conserving:
         potential_vals = []
         kappa_vals = []
 
-        while w0 > 0 and self.kinetic(theta) > 1e-7:
-            while self.kinetic(theta + dtheta) < 0.98 * self.kinetic(theta):
-                dtheta /= 2
-
-            force = f * profile.mag(w0)
-
-            self.kappa -= force * dtheta
-            self.kappa = max(self.kappa, 0)
-
-            if plot:
-                time_vals.append(t)
-                theta_vals.append(theta)
-                omega_vals.append(w0)
-                force_vals.append(force)
-                potential_vals.append(self.potential(theta))
-                kappa_vals.append(self.kappa)
-
-            theta += dtheta
-            w1 = self.omega(theta)
-            dt = dtheta / ((w0 + w1) / 2)
-            t += dt
-            w0 = w1
-
-        plot_data = (
-            np.array(
-                [
-                    time_vals,
-                    kappa_vals,
-                    potential_vals,
-                    np.degrees(theta_vals),
-                    force_vals,
-                ]
-            )
-            if plot
-            else None
-        )
-        return (2 * t, self.kappa / 2, plot_data)
-
-    def half2(
-        self, kappa: float, f: float, profile: Profile, plot: bool = False
-    ) -> Tuple[float, float, NDArray | None]:
-        """
-        Returns: the period, energy, plot data [t, Kappa, PE, Theta, F]
-        """
-
-        self.set_height(kappa)
-        t = 0.0
-        th0 = 0.0
-
-        w_bdc = self.omega(th0)
-
-        time_vals = []
-        theta_vals = []
-        omega_vals = []
-        force_vals = []
-        potential_vals = []
-        kappa_vals = []
-
-        for w in np.arange(w_bdc, 0, -0.01 * w_bdc):
+        step = 0.01
+        for w in np.arange(0, w_bdc, step):
             time_vals.append(t)
             theta_vals.append(th0)
             omega_vals.append(w)
@@ -333,13 +277,15 @@ class Conserving:
             potential_vals.append(self.potential(th0))
             kappa_vals.append(self.kappa)
 
-            w_avg = w - 0.005 * w_bdc
+            w_avg = w + step / 2
+            if w_avg > w_bdc:
+                w_avg = (w_bdc + w) / 2
             ff = f * profile.mag(w_avg)
             th1 = self.theta(w)  # TODO - interpolate ??
             dtheta = th1 - th0
-            dt = dtheta / w_avg
+            dt = abs(dtheta / w_avg)
             t += dt
-            self.kappa -= ff * 0.01
+            self.kappa += ff * step
             th0 = th1
 
         plot_data = (
@@ -355,7 +301,72 @@ class Conserving:
             if plot
             else None
         )
-        return (2 * t, self.kappa / 2, plot_data)
+        quicker = t0 * t_t0(kappa) / 4 - t
+        print(
+            f"Pulling with force {f:.4} raises the bell from {kappa/2:.4} to {self.kappa/2:.4}"
+            f" and makes it strike {quicker:0.3} earlier"
+        )
+        print(
+            f"With no checking, the total period would be {t0*t_t0(kappa)/2 - quicker:.4}"
+        )
+        return (t, self.kappa / 2, plot_data)
+
+    def check(
+        self, kappa: float, f: float, profile: Profile, plot: bool = False
+    ) -> Tuple[float, float, NDArray | None]:
+        """
+        Computes the application of a checking profile from BDC to peak.
+        Returns: the half period, energy, plot data [t, Kappa, PE, Theta, F]
+        """
+
+        self.set_height(kappa)
+        t = 0.0
+        th0 = 0.0
+
+        w_bdc = self.omega(th0)
+
+        time_vals = []
+        theta_vals = []
+        omega_vals = []
+        force_vals = []
+        potential_vals = []
+        kappa_vals = []
+
+        step = 0.01
+        for w in np.arange(w_bdc, 0, -step):
+            time_vals.append(t)
+            theta_vals.append(th0)
+            omega_vals.append(w)
+            ff = f * profile.mag(w)
+            force_vals.append(ff)
+            potential_vals.append(self.potential(th0))
+            kappa_vals.append(self.kappa)
+
+            w_avg = w - step / 2
+            if w_avg < 0:
+                w_avg = w / 2
+            ff = f * profile.mag(w_avg)
+            th1 = self.theta(w)  # TODO - interpolate ??
+            dtheta = th1 - th0
+            dt = dtheta / w_avg
+            t += dt
+            self.kappa -= ff * step
+            th0 = th1
+
+        plot_data = (
+            np.array(
+                [
+                    time_vals,
+                    kappa_vals,
+                    potential_vals,
+                    np.degrees(theta_vals),
+                    force_vals,
+                ]
+            )
+            if plot
+            else None
+        )
+        return (t, self.kappa / 2, plot_data)
 
     def check_and_pull(
         self, kappa: float, a: float, b: float, plot: bool = False, offset: float = 0.0
@@ -567,29 +578,74 @@ def hand_and_back() -> None:
 
 
 def main():
-    profile = Profile((4.0, 1.0)).shape(0.5, 0.8)
-    profile.transfer(1.95, 1.90)
 
-    cons = Conserving(0.996, 12000.0, 0.0, 0.0)
+    cons = Conserving(0.994, 12000.0, 0.0, 0.0)
+    print(f"Natural period: {cons.t0():.6}")
+    base = 2.5
+    target = 7 / 8 * base  # 2.188
+    hunting_down_kappa = kappa_for(target * cons.t0() / 2)
+    print(f"Hunting down Energy: {hunting_down_kappa/2:.4}")
+    rounds_kappa = kappa_for(base)
+    amp, p, _, _, _ = cons.find_check(rounds_kappa, 7 / 8, 2.0)
+    te = kappa_for(p + 0.09) / 2
+    min_te = (
+        kappa_for(target + 0.05) / 2
+    )  # margin above the natural hunting down height
+    print(f"Near check&pull {te:.5}, Minimum {min_te:.5}")
+
+    # Find the period corresponding to the peak energy
+    _, p1, _, _, _ = cons.find_check(2 * te, 1.0, 2.0)  # HACK
+    print("the change in period is", target / p1)
+    amp, p2, e2, _, check = cons.find_check(2 * te, target / p1, 3.0)
+    print(f"base: {base:.3}  amp: {amp:.3} for {check:.3} => period: {p:.3} ")
+    # This actually results
+    half, hue, _ = cons.pull(2 * te, 0.014, Profile((1.0, 4.0)).shape(0.5, 2.0), True)
+    print(te, half, hue)
+    half, hue, _ = cons.pull(
+        # 0.3 % margin produces about 50 msec margin that requires checking to correct.
+        hunting_down_kappa + 2 * 0.003,
+        0.007,
+        Profile((1.0, 4.0)).shape(0.5, 2.0),
+        True,
+    )
+
+    phd = cons.t0() * t_t0(hunting_down_kappa + 2 * 0.003) / 2
+    print(
+        f"Hunting down period with margin is: {phd:.6} vs target {target:.6}  ... {target/phd:.4}"
+    )
+    _, phd, _, _, _ = cons.find_check(hunting_down_kappa + 2 * 0.003, 1.0, 2.0)  # HACK
+    amp, p3, e3, _, check = cons.find_check(
+        hunting_down_kappa + 2 * 0.003, target / phd, 3.0
+    )
+    return
 
     profiles = [
         Profile((1.0, 4.0)).shape(0.5, 0.8),
-        Profile((1.0, 4.0)).shape(0.8, 0.5),
+        Profile((0.2, 4.0)).shape(0.8, 0.5),
         Profile((1.0, 4.0)).shape(0.9, 0.9),
         Profile((1.0, 4.0)).shape(0.2, 2.0),
-        Profile((1.0, 4.0)).shape(0.5, 2.0),
+        Profile((0.1, 4.0)).shape(0.2, 2.0),
+        Profile((0.1, 4.0)).shape(0.2, 1.5),
     ]
+    check = True
     for profile in profiles:
-        f = 0.04  # 0.2/profile.area()
-        _, _, data = cons.half2(1.99, f, profile, True)
+        f = profile.transfer(1.97, 1.92)
+        if check:
+            _, _, data = cons.check(1.97, f, profile, True)
+        else:
+            _, _, data = cons.pull(1.92, f, profile, True)
         print(
             f"E = [{data[1,0]/2:.4} - {data[1,-1]/2:.4}], Raise = {(data[1,0]-data[1,-1])/2:.4}"
             f"  Period={2*data[0,-1]:.4}  Profile Area:{profile.area():0.4}"
         )
         plt.figure(figsize=(12, 6))
-        plt.title("foobar")
-        # plt.ylim(0, 1)
-        plt.xlim(data[0][-1], 0)
+        plt.title("Check or Pull")
+        plt.ylim(0, 1)
+        plt.xlim(0, data[0][-1])
+        if check:
+            plt.title("Checking")
+        else:
+            plt.title("Pulling")
         # plt.ylabel("Theta (degrees)")
         plt.plot(data[0], 10 * (1 - data[1] / 2), label="10x delta E", linewidth=0.5)
         plt.plot(data[0], data[2], label="PE", linewidth=0.5)
