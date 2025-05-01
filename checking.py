@@ -199,10 +199,9 @@ class Pendulum:
         return (1 - np.cos(theta)) / 2
 
     @staticmethod
-    @lru_cache(maxsize=16)
     def delta_t(
-        L: float, k0: float, w0: float, th0: float, dk: float, dw: float
-    ) -> Tuple[float, float]:
+        L: float, k0: float, w0: float, dk: float, dw: float
+    ) -> Tuple[float, float, bool]:
         """Compute the time to go from k0 to w0+dw, and the angle at that point.
         Parameters:
             L: length of pendulum in meters
@@ -211,7 +210,13 @@ class Pendulum:
             th0: initial theta
             dk: change in kappa
             dw: change in omega
+        Returns:
+            th1: final theta
+            dt: time to go from k0 to k1
+            bdc: True if the bell is at BDC
         """
+        th0 = Pendulum.theta(L, k0, w0)
+        bdc = False
         assert dw > 0, f"Invalid dw: {dw:.4}"
         assert math.isclose(
             k0, Pendulum.kappa(L, w0, th0), rel_tol=1e-7
@@ -223,12 +228,12 @@ class Pendulum:
             f = dw / (w_bdc - w0)
             w1 = w0 + f * dw
             k1 = k0 + f * dk
+            bdc = True
 
         th1 = Pendulum.theta(L, k1, w1)
         dtheta = th1 - th0
         dt = abs(dtheta / ((w0 + w1) / 2))
-        assert math.isfinite(dt), f"{dt:.4} {w0:.4} {w1:.4} {th0:.4} {th1:.4}"
-        return th1, dt
+        return th1, dt, bdc
 
 
 class Conserving:
@@ -270,22 +275,6 @@ class Conserving:
 
     def theta(self, omega: float) -> float:
         return Pendulum.theta(self.L, self.kappa, omega)
-
-    def xdelta_t(self, w0, th0, w1) -> Tuple[float, float]:
-        """
-        Problem here...  If we change kappa between calls, then
-        the theta values will be discontinuous.
-        If we pass in th0, we can reproduce what is currently
-        done in the pull() method.
-        Returns th1, dt
-        """
-        w_avg = (w0 + w1) / 2  # midpoint
-        if w_avg > self.omega_bdc():
-            w_avg = (self.omega_bdc() + w0) / 2
-        th1 = self.theta(w1)  # TODO - interpolate ??
-        dtheta = th1 - th0
-        dt = abs(dtheta / w_avg)
-        return th1, dt
 
     def period(self, kappa: float) -> float:
         """
@@ -329,27 +318,15 @@ class Conserving:
         """
 
         self.set_height(kappa)
-        w_bdc = self.omega_bdc()
 
         t = 0.0
-        th0 = self.theta(0.0)
-        for w in np.arange(0, w_bdc, step):
-            # For each step, we want to estimate the time from
-            # this point to the next point.
-            w0 = w
-            w1 = w + step
-            w_avg = (w0 + w1) / 2  # (w0 + 4 * wm + w1) / 6
-            if w_avg > w_bdc:
-                w_avg = (w_bdc + w) / 2
-            th1 = self.theta(w1)  # TODO - interpolate ??
-            dtheta = th1 - th0
-            dt = abs(dtheta / w_avg)
+        w0 = 0.0
+        bdc = False
+        while not bdc:
+            _, dt, bdc = Pendulum.delta_t(self.L, self.kappa, w0, 0.0, step)
+            w0 += step
             t += dt
-            th0 = th1
         t_base = t
-        # assert t_base == self.t0() / 4 * t_t0(
-        #     kappa
-        # ), f"{t_base:.4} {self.t0()/4 * t_t0(kappa):.4}"
 
         time_vals = []
         theta_vals = []
@@ -360,52 +337,26 @@ class Conserving:
 
         t = 0.0
         th0 = self.theta(0.0)
-        w = 0.0
-        while True:
-            # Here, omega_bdc is getting larger as we add energy!
-            if w > self.omega_bdc():
-                print(f"Stopping at {w:.4} {th0:.4} {self.kappa:.4}")
-            # break
+        w0 = 0.0
+        bdc = False
+        while not bdc:
             time_vals.append(t)
             theta_vals.append(th0)
-            omega_vals.append(w)
-            ff = f * profile.mag(w)
+            omega_vals.append(w0)
+            ff = f * profile.mag(w0)
             force_vals.append(ff)
             potential_vals.append(self.potential(th0))
             kappa_vals.append(self.kappa)
 
-            # For each step, we want to estimate the time from
-            # this point to the next point.
-            w0 = w
-            w1 = w + step
-            if w1 > self.omega_bdc():
-                w1 = self.omega_bdc()
-            ff = f * profile.mag(w_avg)
-            other = Pendulum.delta_t(self.L, self.kappa, w0, th0, ff * step, step)
-            w_avg = (w0 + w1) / 2
-            assert w_avg > 1e-8
-            assert math.isfinite(w_avg)
+            ff = f * profile.mag(w0 + step / 2)
+            th1, dt, bdc = Pendulum.delta_t(self.L, self.kappa, w0, ff * step, step)
 
-            # If we don't take delta_kappa into account here, then we
-            # get a smaller th1, and a smaller dtheta.  This makes dt smaller.
-            # This is a LARGE EFFECT.
             self.kappa += ff * step
-            th1 = self.theta(w1)  # TODO - interpolate ??
-            # assert math.isclose(
-            #     th1, other[0], abs_tol=1e-7, rel_tol=1e-7
-            # ), f"{th1:.8} {other[0]:.8}"
-            dtheta = th1 - th0
-            dt = abs(dtheta / w_avg)
-            # assert w0 > 6 or math.isclose(
-            #     dt, other[1], rel_tol=1e-6
-            # ), f"{w0:.3} {dt:.7} {other[1]:.7}"
-            # print(f"dt: {dt:.4} fn: {other[2]:.4}")
-            t += other[1]  # other[1]
+            t += dt
             th0 = th1
 
-            w += step
-            if w > self.omega_bdc():
-                print(f"Stopping at {w:.4} {th0:.6}")
+            w0 += step
+            if bdc:
                 break
 
         plot_data = (
@@ -718,6 +669,8 @@ def main():
     target = 7 / 8 * base  # 2.188
     hunting_down_kappa = kappa_for(target * cons.t0() / 2)
     print(f"Hunting down Energy: {hunting_down_kappa/2:.4}")
+    # TODO - changes to this profile make a big difference in the delay,
+    # and a small difference in the energy.
     prof = Profile((0.1, 4.0)).shape(0.1, 2.0)
     if False:
         rounds_kappa = kappa_for(base)
