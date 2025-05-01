@@ -718,7 +718,7 @@ def main():
     target = 7 / 8 * base  # 2.188
     hunting_down_kappa = kappa_for(target * cons.t0() / 2)
     print(f"Hunting down Energy: {hunting_down_kappa/2:.4}")
-    prof = Profile((1.0, 4.0)).shape(0.5, 2.0)
+    prof = Profile((0.1, 4.0)).shape(0.1, 2.0)
     if False:
         rounds_kappa = kappa_for(base)
         amp, p, _, _, _ = cons.find_check(rounds_kappa, 7 / 8, 2.0)
