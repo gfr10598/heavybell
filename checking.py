@@ -44,6 +44,7 @@ from numpy.typing import NDArray
 import numpy as np
 import matplotlib.pyplot as plt
 import mplcursors  # type: ignore
+from functools import lru_cache
 import math
 
 
@@ -161,6 +162,72 @@ def quad(center: float, width: float, x: float):
     return math.pow(q, 0.8) if q > 0 else 0.0
 
 
+class Pendulum:
+    @staticmethod
+    @lru_cache(maxsize=16)
+    def omega(L: float, kappa: float, theta: float) -> float:
+        return 2 * np.sqrt(9.81 * Pendulum.kinetic(kappa, theta) / L)
+
+    @staticmethod
+    @lru_cache(maxsize=16)
+    def omega_bdc(L: float, kappa: float) -> float:
+        return 2 * np.sqrt(9.81 / L * kappa / 2)
+
+    @staticmethod
+    @lru_cache(maxsize=16)
+    def theta(L: float, kappa: float, omega: float) -> float:
+        cos = 1 - kappa + (omega**2) * L / 9.81 / 2
+        if cos > 1:
+            return 0.0
+        if cos < -1:
+            return np.pi
+        return np.arccos(cos) if -1 <= cos <= 1 else 0.0
+
+    @staticmethod
+    @lru_cache(maxsize=16)
+    def kappa(L: float, omega: float, theta: float) -> float:
+        return 1 - np.cos(theta) + (omega**2) * L / 9.81 / 2
+
+    @staticmethod
+    @lru_cache(maxsize=16)
+    def kinetic(kappa: float, theta: float) -> float:
+        return kappa / 2 - Pendulum.potential(theta)
+
+    @staticmethod
+    @lru_cache(maxsize=16)
+    def potential(theta: float) -> float:
+        return (1 - np.cos(theta)) / 2
+
+    @staticmethod
+    @lru_cache(maxsize=16)
+    def delta_t(
+        L: float, k0: float, w0: float, th0: float, dk: float, dw: float
+    ) -> Tuple[float, float]:
+        """Compute the time to go from k0 to w0+dw, and the angle at that point.
+        Parameters:
+            L: length of pendulum in meters
+            k0: initial kappa
+            w0: initial omega
+            th0: initial theta
+            dk: change in kappa
+            dw: change in omega
+        """
+        assert dw > 0, f"Invalid dw: {dw:.4}"
+        k1 = k0 + dk
+        w1 = w0 + dw
+        w_bdc = Pendulum.omega_bdc(L, k1)
+        if w1 > w_bdc:
+            f = dw / (w_bdc - w0)
+            w1 = w0 + f * dw
+            k1 = k0 + f * dk
+
+        th1 = Pendulum.theta(L, k1, w1)
+        dtheta = th1 - th0
+        dt = abs(dtheta / ((w0 + w1) / 2))
+        assert math.isfinite(dt), f"{dt:.4} {w0:.4} {w1:.4} {th0:.4} {th1:.4}"
+        return th1, dt
+
+
 class Conserving:
     def __init__(self, L: float, ft_lbs: float, loss: float, rope: float):
         """
@@ -195,31 +262,27 @@ class Conserving:
     def omega(self, theta: float) -> float:
         return 2 * np.sqrt(9.81 * self.kinetic(theta) / self.L)
 
+    def omega_bdc(self) -> float:
+        return Pendulum.omega_bdc(self.L, self.kappa)
+
     def theta(self, omega: float) -> float:
+        return Pendulum.theta(self.L, self.kappa, omega)
+
+    def xdelta_t(self, w0, th0, w1) -> Tuple[float, float]:
         """
-        Find the angle of the bell at a given angular velocity
-        omega = 2 * np.sqrt(9.81 * self.kinetic(theta) / self.L)
-        kinetic = self.kappa / 2 - self.potential(theta)
-        potential = (1 - np.cos(theta)) / 2
-        kinetic = (self.kappa / 2 - (1 - np.cos(theta)) / 2)
-        w = 2 * np.sqrt(9.81 * (self.kappa / 2 - (1 - np.cos(theta)) / 2) / self.L)
-        (w/2)**2 = 9.81 * (self.kappa / 2 - (1 - np.cos(theta)) / 2) / self.L
-        (w/2)**2 * self.L = 9.81 * (self.kappa / 2 - (1 - np.cos(theta)) / 2)
-        (w/2)**2 * self.L / 9.81 = (self.kappa - (1 - np.cos(theta)))/2
-        2*((w/2)**2 * self.L / 9.81) - self.kappa = - (1 - np.cos(theta))
-        1 - np.cos(theta) = self.kappa - 2*((w/2)**2 * self.L / 9.81)
-        np.cos(theta) = 1 - self.kappa + 2*((w/2)**2 * self.L / 9.81)
-        theta = np.arccos(1 - self.kappa + 2 * ((omega / 2) ** 2 * self.L / 9.81))
-
+        Problem here...  If we change kappa between calls, then
+        the theta values will be discontinuous.
+        If we pass in th0, we can reproduce what is currently
+        done in the pull() method.
+        Returns th1, dt
         """
-
-        cos = 1 - self.kappa + (omega**2) * self.L / 9.81 / 2
-        if cos > 1:
-            return 0.0
-        if cos < -1:
-            return np.pi
-
-        return np.arccos(cos) if -1 <= cos <= 1 else 0.0
+        w_avg = (w0 + w1) / 2  # midpoint
+        if w_avg > self.omega_bdc():
+            w_avg = (self.omega_bdc() + w0) / 2
+        th1 = self.theta(w1)  # TODO - interpolate ??
+        dtheta = th1 - th0
+        dt = abs(dtheta / w_avg)
+        return th1, dt
 
     def period(self, kappa: float) -> float:
         """
@@ -246,19 +309,44 @@ class Conserving:
         return 2 * t
 
     def pull(
-        self, kappa: float, f: float, profile: Profile, plot: bool = False
+        self,
+        kappa: float,
+        f: float,
+        profile: Profile,
+        plot: bool = False,
+        step: float = 0.01,
     ) -> Tuple[float, float, NDArray | None]:
         """
         Computes the application of a pulling profile from peak to BDC.
+        Pulling (after peak) makes the bell strike earlier.  The delay vs pull
+        force is sublinear, close to delta t ~ sqrt(f).
+        The
         Returns: the half period, energy, plot data [t, Kappa, PE, Theta, F]
+
         """
 
         self.set_height(kappa)
-        t0 = self.t0()
+        w_bdc = self.omega_bdc()
+
         t = 0.0
         th0 = self.theta(0.0)
-
-        w_bdc = self.omega(0.0)
+        for w in np.arange(0, w_bdc, step):
+            # For each step, we want to estimate the time from
+            # this point to the next point.
+            w0 = w
+            w1 = w + step
+            w_avg = (w0 + w1) / 2  # (w0 + 4 * wm + w1) / 6
+            if w_avg > w_bdc:
+                w_avg = (w_bdc + w) / 2
+            th1 = self.theta(w1)  # TODO - interpolate ??
+            dtheta = th1 - th0
+            dt = abs(dtheta / w_avg)
+            t += dt
+            th0 = th1
+        t_base = t
+        # assert t_base == self.t0() / 4 * t_t0(
+        #     kappa
+        # ), f"{t_base:.4} {self.t0()/4 * t_t0(kappa):.4}"
 
         time_vals = []
         theta_vals = []
@@ -267,8 +355,14 @@ class Conserving:
         potential_vals = []
         kappa_vals = []
 
-        step = 0.01
-        for w in np.arange(0, w_bdc, step):
+        t = 0.0
+        th0 = self.theta(0.0)
+        w = 0.0
+        while True:
+            # Here, omega_bdc is getting larger as we add energy!
+            if w > self.omega_bdc():
+                print(f"Stopping at {w:.4} {th0:.4} {self.kappa:.4}")
+            # break
             time_vals.append(t)
             theta_vals.append(th0)
             omega_vals.append(w)
@@ -277,16 +371,33 @@ class Conserving:
             potential_vals.append(self.potential(th0))
             kappa_vals.append(self.kappa)
 
-            w_avg = w + step / 2
-            if w_avg > w_bdc:
-                w_avg = (w_bdc + w) / 2
+            # For each step, we want to estimate the time from
+            # this point to the next point.
+            w0 = w
+            w1 = w + step
+            if w1 > self.omega_bdc():
+                w1 = self.omega_bdc()
             ff = f * profile.mag(w_avg)
-            th1 = self.theta(w)  # TODO - interpolate ??
+            other = Pendulum.delta_t(self.L, self.kappa, w0, th0, ff * step, step)
+            w_avg = (w0 + w1) / 2
+            assert w_avg > 1e-8
+            assert math.isfinite(w_avg)
+
+            th1 = self.theta(w1)  # TODO - interpolate ??
             dtheta = th1 - th0
             dt = abs(dtheta / w_avg)
-            t += dt
+            # assert w0 > 6 or math.isclose(
+            #     dt, other[1], rel_tol=1e-6
+            # ), f"{w0:.3} {dt:.7} {other[1]:.7}"
+            # print(f"dt: {dt:.4} fn: {other[2]:.4}")
+            t += other[1]
             self.kappa += ff * step
             th0 = th1
+
+            w += step
+            if w > self.omega_bdc():
+                print(f"Stopping at {w:.4} {th0:.6}")
+                break
 
         plot_data = (
             np.array(
@@ -301,14 +412,12 @@ class Conserving:
             if plot
             else None
         )
-        quicker = t0 * t_t0(kappa) / 4 - t
+        quicker = t_base - t
         print(
             f"Pulling with force {f:.4} raises the bell from {kappa/2:.4} to {self.kappa/2:.4}"
             f" and makes it strike {quicker:0.3} earlier"
         )
-        print(
-            f"With no checking, the total period would be {t0*t_t0(kappa)/2 - quicker:.4}"
-        )
+        print(f"With no checking, the total period would be {t_base + t:.4}")
         return (t, self.kappa / 2, plot_data)
 
     def check(
@@ -577,46 +686,78 @@ def hand_and_back() -> None:
     )
 
 
+def test_kappa() -> None:
+    L = 0.9969
+    o_bdc = Pendulum.omega_bdc(L, 1.99)
+    th = Pendulum.theta(L, 1.99, o_bdc * math.sqrt(0.5))
+    k = Pendulum.kappa(L, 1.0, th)
+    th1 = Pendulum.theta(L, k, 1.0)
+    assert th1 == th
+
+
 def main():
+    test_kappa()
 
     cons = Conserving(0.994, 12000.0, 0.0, 0.0)
     print(f"Natural period: {cons.t0():.6}")
+    print(f"Estimated period: {cons.period(1.98):.6}")
+    # for step in [0.01, 0.03, 0.1]:
+    #     cons.pull(1.98, 0.1, Profile((1.0, 4.0)).shape(0.5, 2.0), True, step)
+    # return
+
     base = 2.5
     target = 7 / 8 * base  # 2.188
     hunting_down_kappa = kappa_for(target * cons.t0() / 2)
     print(f"Hunting down Energy: {hunting_down_kappa/2:.4}")
-    rounds_kappa = kappa_for(base)
-    amp, p, _, _, _ = cons.find_check(rounds_kappa, 7 / 8, 2.0)
-    te = kappa_for(p + 0.09) / 2
-    min_te = (
-        kappa_for(target + 0.05) / 2
-    )  # margin above the natural hunting down height
-    print(f"Near check&pull {te:.5}, Minimum {min_te:.5}")
+    prof = Profile((1.0, 4.0)).shape(0.5, 2.0)
+    if False:
+        rounds_kappa = kappa_for(base)
+        amp, p, _, _, _ = cons.find_check(rounds_kappa, 7 / 8, 2.0)
+        te = kappa_for(p + 0.09) / 2
+        min_te = (
+            kappa_for(target + 0.05) / 2
+        )  # margin above the natural hunting down height
+        print(f"Near check&pull {te:.5}, Minimum {min_te:.5}")
 
-    # Find the period corresponding to the peak energy
-    _, p1, _, _, _ = cons.find_check(2 * te, 1.0, 2.0)  # HACK
-    print("the change in period is", target / p1)
-    amp, p2, e2, _, check = cons.find_check(2 * te, target / p1, 3.0)
-    print(f"base: {base:.3}  amp: {amp:.3} for {check:.3} => period: {p:.3} ")
-    # This actually results
-    half, hue, _ = cons.pull(2 * te, 0.014, Profile((1.0, 4.0)).shape(0.5, 2.0), True)
-    print(te, half, hue)
-    half, hue, _ = cons.pull(
+        # Find the period corresponding to the peak energy
+        _, p1, _, _, _ = cons.find_check(2 * te, 1.0, 2.0)  # HACK
+        print("the change in period is", target / p1)
+        amp, p2, e2, _, check = cons.find_check(2 * te, target / p1, 3.0)
+        print(f"base: {base:.3}  amp: {amp:.3} for {check:.3} => period: {p:.3} ")
+
+        half, hue, _ = cons.pull(2 * te, 0.014, prof, True)
+        print(te, half, hue)
+
         # 0.3 % margin produces about 50 msec margin that requires checking to correct.
-        hunting_down_kappa + 2 * 0.003,
-        0.007,
-        Profile((1.0, 4.0)).shape(0.5, 2.0),
-        True,
-    )
+        half, hue, _ = cons.pull(hunting_down_kappa + 2 * 0.003, 0.007, prof, True)
 
-    phd = cons.t0() * t_t0(hunting_down_kappa + 2 * 0.003) / 2
-    print(
-        f"Hunting down period with margin is: {phd:.6} vs target {target:.6}  ... {target/phd:.4}"
-    )
-    _, phd, _, _, _ = cons.find_check(hunting_down_kappa + 2 * 0.003, 1.0, 2.0)  # HACK
-    amp, p3, e3, _, check = cons.find_check(
-        hunting_down_kappa + 2 * 0.003, target / phd, 3.0
-    )
+        phd = cons.t0() * t_t0(hunting_down_kappa + 2 * 0.003) / 2
+        print(
+            f"Hunting down period with margin is: {phd:.6} vs target {target:.6}  ... {target/phd:.4}"
+        )
+        _, phd, _, _, _ = cons.find_check(
+            hunting_down_kappa + 2 * 0.003, 1.0, 2.0
+        )  # HACK
+        amp, p3, e3, _, check = cons.find_check(
+            hunting_down_kappa + 2 * 0.003, target / phd, 3.0
+        )
+
+        _, phd, _, _, _ = cons.find_check(hunting_down_kappa + 0.003, 1.0, 2.0)  # HACK
+        amp, p4, e4, _, check = cons.find_check(
+            hunting_down_kappa + 0.004, target / phd, 3.0
+        )
+
+        # 0.3 % margin produces about 50 msec margin that requires checking to correct.
+        half, hue, _ = cons.pull(hunting_down_kappa + 0.004, 0.003, prof, True)
+
+    print("graded pull forces")
+    for force in [0.0, 0.002, 0.004, 0.008, 0.016]:
+        cons.pull(hunting_down_kappa, force, prof, True, 0.001)
+    for force in [0.0, 0.002, 0.004, 0.008, 0.016]:
+        cons.pull(1.998, force, prof, True, step=0.001)
+
+    # We end up requiring a force of 0.015 for the check and pull for hunting down, so that
+    # we have enough margin to pull the stroke in 2nd place to set up for the point lead.
     return
 
     profiles = [
