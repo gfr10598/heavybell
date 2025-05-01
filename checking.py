@@ -213,6 +213,9 @@ class Pendulum:
             dw: change in omega
         """
         assert dw > 0, f"Invalid dw: {dw:.4}"
+        assert math.isclose(
+            k0, Pendulum.kappa(L, w0, th0), rel_tol=1e-7
+        ), f"{k0:.8} {Pendulum.kappa(L, w0, th0):.8}"
         k1 = k0 + dk
         w1 = w0 + dw
         w_bdc = Pendulum.omega_bdc(L, k1)
@@ -383,15 +386,21 @@ class Conserving:
             assert w_avg > 1e-8
             assert math.isfinite(w_avg)
 
+            # If we don't take delta_kappa into account here, then we
+            # get a smaller th1, and a smaller dtheta.  This makes dt smaller.
+            # This is a LARGE EFFECT.
+            self.kappa += ff * step
             th1 = self.theta(w1)  # TODO - interpolate ??
+            # assert math.isclose(
+            #     th1, other[0], abs_tol=1e-7, rel_tol=1e-7
+            # ), f"{th1:.8} {other[0]:.8}"
             dtheta = th1 - th0
             dt = abs(dtheta / w_avg)
             # assert w0 > 6 or math.isclose(
             #     dt, other[1], rel_tol=1e-6
             # ), f"{w0:.3} {dt:.7} {other[1]:.7}"
             # print(f"dt: {dt:.4} fn: {other[2]:.4}")
-            t += other[1]
-            self.kappa += ff * step
+            t += other[1]  # other[1]
             th0 = th1
 
             w += step
@@ -752,9 +761,9 @@ def main():
 
     print("graded pull forces")
     for force in [0.0, 0.002, 0.004, 0.008, 0.016]:
-        cons.pull(hunting_down_kappa, force, prof, True, 0.001)
-    for force in [0.0, 0.002, 0.004, 0.008, 0.016]:
-        cons.pull(1.998, force, prof, True, step=0.001)
+        cons.pull(hunting_down_kappa, force, prof, True, 0.01)
+    # for force in [0.0, 0.002, 0.004, 0.008, 0.016]:
+    #     cons.pull(1.998, force, prof, True, step=0.001)
 
     # We end up requiring a force of 0.015 for the check and pull for hunting down, so that
     # we have enough margin to pull the stroke in 2nd place to set up for the point lead.
