@@ -216,24 +216,36 @@ class Pendulum:
             bdc: True if the bell is at BDC
         """
         th0 = Pendulum.theta(L, k0, w0)
-        bdc = False
-        assert dw > 0, f"Invalid dw: {dw:.4}"
-        assert math.isclose(
-            k0, Pendulum.kappa(L, w0, th0), rel_tol=1e-7
-        ), f"{k0:.8} {Pendulum.kappa(L, w0, th0):.8}"
+        done = False
+        assert dw * dk >= 0, f"Invalid dw: {dw} dk: {dk}"
+        assert dw != 0, f"Invalid dw: {dw}"
+
         k1 = k0 + dk
         w1 = w0 + dw
-        w_bdc = Pendulum.omega_bdc(L, k1)
-        if w1 > w_bdc:
-            f = dw / (w_bdc - w0)
-            w1 = w0 + f * dw
-            k1 = k0 + f * dk
-            bdc = True
+        if dw > 0:
+            # When dw is positive, we are pulling the bell.
+            # So, omega is increasing, and we need to check that
+            # the bell has not reached its BDC (w = w_bdc)
+            w_bdc = Pendulum.omega_bdc(L, k1)
+            if w1 > w_bdc:
+                fraction = (w_bdc - w0) / dw
+                w1 = w0 + fraction * dw
+                k1 = k0 + fraction * dk
+                done = True
+        else:
+            # When dw is negative, we are checking the bell.
+            # So, omega is decreasing, and we need to check that
+            # the bell has not reached its peak (w = 0)
+            if w1 < 0:
+                fraction = -w0 / dw
+                w1 = w0 + fraction * dw
+                k1 = k0 + fraction * dk
+                done = True
 
         th1 = Pendulum.theta(L, k1, w1)
         dtheta = th1 - th0
         dt = abs(dtheta / ((w0 + w1) / 2))
-        return th1, dt, bdc
+        return th1, dt, done
 
 
 class Conserving:
@@ -388,12 +400,6 @@ class Conserving:
         Returns: the half period, energy, plot data [t, Kappa, PE, Theta, F]
         """
 
-        self.set_height(kappa)
-        t = 0.0
-        th0 = 0.0
-
-        w_bdc = self.omega(th0)
-
         time_vals = []
         theta_vals = []
         omega_vals = []
@@ -401,8 +407,12 @@ class Conserving:
         potential_vals = []
         kappa_vals = []
 
-        step = 0.01
-        for w in np.arange(w_bdc, 0, -step):
+        self.set_height(kappa)
+        t = 0.0
+        th0 = 0.0
+        w_bdc = self.omega(th0)
+        step = -0.01
+        for w in np.arange(w_bdc, 0, step):
             time_vals.append(t)
             theta_vals.append(th0)
             omega_vals.append(w)
@@ -411,6 +421,7 @@ class Conserving:
             potential_vals.append(self.potential(th0))
             kappa_vals.append(self.kappa)
 
+            _ = Pendulum.delta_t(self.L, self.kappa, w, ff * step, step)
             w_avg = w - step / 2
             if w_avg < 0:
                 w_avg = w / 2
@@ -720,6 +731,7 @@ def main():
 
     # We end up requiring a force of 0.015 for the check and pull for hunting down, so that
     # we have enough margin to pull the stroke in 2nd place to set up for the point lead.
+    _, _, data = cons.check(1.97, 0.01, prof, True)
     return
 
     profiles = [
