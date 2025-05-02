@@ -141,9 +141,18 @@ class Profile:
 
     def mag(self, w: float) -> float:
         if self.w_shape != 1.0:
+            # BUG - this is sometimes throwing a warning.
             w = w**self.w_shape
         q = 1 - ((w - self.w_center) / self.w_width) ** 2
         return math.pow(q, self.f_shape) if q > 0 else 0.0
+
+    def trapezoid(self, w0: float, w1: float) -> float:
+        """
+        Compute the trapezoidal approximation of the force profile.
+        """
+        f0 = self.mag(w0)
+        f1 = self.mag(w1)
+        return (f0 + f1) / 2
 
 
 def t_t0(kappa: float) -> float:
@@ -203,6 +212,12 @@ class Pendulum:
         L: float, k0: float, w0: float, dk: float, dw: float
     ) -> Tuple[float, float, bool]:
         """Compute the time to go from k0 to w0+dw, and the angle at that point.
+        NOTE: Sometimes, kappa > 2, in which case
+        when checking, the bell may go over the balance.
+        However, the caller should be forcing omega to go
+        to zero.  When it does, theta will saturate at pi,
+        in the Pendulum.theta() function.  So, the computed
+        time will be the time to reach TDC.
         Parameters:
             L: length of pendulum in meters
             k0: initial kappa
@@ -243,8 +258,11 @@ class Pendulum:
                 done = True
 
         th1 = Pendulum.theta(L, k1, w1)
+        w_mid = Pendulum.omega(L, (k0 + k1) / 2, (th0 + th1) / 2)
+        # This makes a very tiny difference.
+        simpson = (w0 + 4 * w_mid + w1) / 6
         dtheta = th1 - th0
-        dt = abs(dtheta / ((w0 + w1) / 2))
+        dt = abs(dtheta / simpson)
         return th1, dt, done
 
 
@@ -332,8 +350,14 @@ class Conserving:
         self.set_height(kappa)
 
         t = 0.0
-        w0 = 0.0
+        # If kappa > 2.0, this will be pi, and the bell will start at TDC.
+        th_start = Pendulum.theta(self.L, self.kappa, 0.0)
+        # If kappa > 2.0, this may be non-zero.
+        w_start = Pendulum.omega(self.L, self.kappa, th_start)
+
+        # First, find the swing time with no checking, for reference.
         bdc = False
+        w0 = w_start
         while not bdc:
             _, dt, bdc = Pendulum.delta_t(self.L, self.kappa, w0, 0.0, step)
             w0 += step
@@ -348,13 +372,11 @@ class Conserving:
         kappa_vals = []
 
         t = 0.0
-        th0 = self.theta(0.0)
-        w0 = 0.0
+        th0 = th_start
+        w0 = w_start
         bdc = False
         while not bdc:
             f0 = f * profile.mag(w0)
-            f1 = f * profile.mag(w0 + step)
-            f_avg = (f0 + f1) / 2
             time_vals.append(t)
             theta_vals.append(th0)
             omega_vals.append(w0)
@@ -362,6 +384,7 @@ class Conserving:
             potential_vals.append(self.potential(th0))
             kappa_vals.append(self.kappa)
 
+            f_avg = f * profile.trapezoid(w0, w0 + step)
             th1, dt, bdc = Pendulum.delta_t(self.L, self.kappa, w0, f_avg * step, step)
 
             self.kappa += f_avg * step
@@ -371,6 +394,13 @@ class Conserving:
             w0 += step
             if bdc:
                 break
+        f0 = f * profile.mag(w0)
+        time_vals.append(t)
+        theta_vals.append(th0)
+        omega_vals.append(w0)
+        force_vals.append(f0)
+        potential_vals.append(self.potential(th0))
+        kappa_vals.append(self.kappa)
 
         plot_data = (
             np.array(
@@ -380,6 +410,7 @@ class Conserving:
                     potential_vals,
                     np.degrees(theta_vals),
                     force_vals,
+                    omega_vals,
                 ]
             )
             if plot
@@ -387,8 +418,8 @@ class Conserving:
         )
         quicker = t_base - t
         print(
-            f"Pulling @ {f:.4} raises from {kappa/2:.4} to {self.kappa/2:.4}"
-            f" and makes strike {quicker:0.3} earlier"
+            f"Pulling @ {f:.4} raises from {kappa/2:.5} to {self.kappa/2:.5}"
+            f" ({(self.kappa-kappa)/2:.6}) and makes strike {quicker:0.3} earlier"
             f" -> {t_base + t:.4}"
         )
         return (t, self.kappa / 2, plot_data)
@@ -413,24 +444,30 @@ class Conserving:
         th0 = 0.0
         step = -step
         done = False
-        w = self.omega(th0)
+        w0 = self.omega(th0)
         while not done:
-            f0 = f * profile.mag(w)
-            f1 = f * profile.mag(w + step)
-            f_avg = (f0 + f1) / 2
+            f0 = f * profile.mag(w0)
             time_vals.append(t)
             theta_vals.append(th0)
-            omega_vals.append(w)
+            omega_vals.append(w0)
             force_vals.append(f0)
             potential_vals.append(self.potential(th0))
             kappa_vals.append(self.kappa)
 
-            assert f_avg >= 0, f"Invalid f_avg: {f_avg}"
-            th1, dt, done = Pendulum.delta_t(self.L, self.kappa, w, f_avg * step, step)
+            f_avg = f * profile.trapezoid(w0, w0 + step)
+            th1, dt, done = Pendulum.delta_t(self.L, self.kappa, w0, f_avg * step, step)
             t += dt
             self.kappa += f_avg * step
             th0 = th1
-            w += step
+            w0 += step
+
+        f0 = f * profile.mag(w0)
+        time_vals.append(t)
+        theta_vals.append(th0)
+        omega_vals.append(w0)
+        force_vals.append(f0)
+        potential_vals.append(self.potential(th0))
+        kappa_vals.append(self.kappa)
 
         plot_data = (
             np.array(
@@ -440,6 +477,7 @@ class Conserving:
                     potential_vals,
                     np.degrees(theta_vals),
                     force_vals,
+                    omega_vals,
                 ]
             )
             if plot
@@ -705,7 +743,8 @@ def main():
 
         phd = cons.t0() * t_t0(hunting_down_kappa + 2 * 0.003) / 2
         print(
-            f"Hunting down period with margin is: {phd:.6} vs target {target:.6}  ... {target/phd:.4}"
+            f"Hunting down period with margin is: {phd:.6} vs target {target:.6}"
+            f"  ... {target/phd:.4}"
         )
         _, phd, _, _, _ = cons.find_check(
             hunting_down_kappa + 2 * 0.003, 1.0, 2.0
@@ -724,9 +763,14 @@ def main():
 
     print("graded pull forces")
     for force in [0.0, 0.002, 0.004, 0.008, 0.016]:
-        cons.pull(hunting_down_kappa, force, prof, True, 0.01)
-        t, e, _ = cons.check(cons.kappa, force, prof, True, step=0.01)
-        print(f"Force: {force:.3}  Energy: {e:.4}  Interval: {1.098 + t:.4}")
+        _, peak, pull_data = cons.pull(hunting_down_kappa, force, prof, True, 0.001)
+        t, end, check_data = cons.check(cons.kappa, force, prof, True, step=0.001)
+        print(
+            f"Force: {force:.3}  Energy: {end:.4}  Interval: {1.098 + t:.5}"
+            f" (({peak-end:.6}))"
+        )
+        # with np.printoptions(precision=5, suppress=True):
+        #     print(pull_data[5], check_data[5][::-1])
     # for force in [0.0, 0.002, 0.004, 0.008, 0.016]:
     #     cons.pull(1.998, force, prof, True, step=0.001)
 
