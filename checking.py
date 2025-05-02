@@ -352,18 +352,19 @@ class Conserving:
         w0 = 0.0
         bdc = False
         while not bdc:
+            f0 = f * profile.mag(w0)
+            f1 = f * profile.mag(w0 + step)
+            f_avg = (f0 + f1) / 2
             time_vals.append(t)
             theta_vals.append(th0)
             omega_vals.append(w0)
-            ff = f * profile.mag(w0)
-            force_vals.append(ff)
+            force_vals.append(f0)
             potential_vals.append(self.potential(th0))
             kappa_vals.append(self.kappa)
 
-            ff = f * profile.mag(w0 + step / 2)
-            th1, dt, bdc = Pendulum.delta_t(self.L, self.kappa, w0, ff * step, step)
+            th1, dt, bdc = Pendulum.delta_t(self.L, self.kappa, w0, f_avg * step, step)
 
-            self.kappa += ff * step
+            self.kappa += f_avg * step
             t += dt
             th0 = th1
 
@@ -386,14 +387,14 @@ class Conserving:
         )
         quicker = t_base - t
         print(
-            f"Pulling with force {f:.4} raises the bell from {kappa/2:.4} to {self.kappa/2:.4}"
-            f" and makes it strike {quicker:0.3} earlier"
+            f"Pulling @ {f:.4} raises from {kappa/2:.4} to {self.kappa/2:.4}"
+            f" and makes strike {quicker:0.3} earlier"
+            f" -> {t_base + t:.4}"
         )
-        print(f"With no checking, the total period would be {t_base + t:.4}")
         return (t, self.kappa / 2, plot_data)
 
     def check(
-        self, kappa: float, f: float, profile: Profile, plot: bool = False
+        self, kappa: float, f: float, profile: Profile, plot: bool = False, step=0.01
     ) -> Tuple[float, float, NDArray | None]:
         """
         Computes the application of a checking profile from BDC to peak.
@@ -410,28 +411,26 @@ class Conserving:
         self.set_height(kappa)
         t = 0.0
         th0 = 0.0
-        w_bdc = self.omega(th0)
-        step = -0.01
-        for w in np.arange(w_bdc, 0, step):
+        step = -step
+        done = False
+        w = self.omega(th0)
+        while not done:
+            f0 = f * profile.mag(w)
+            f1 = f * profile.mag(w + step)
+            f_avg = (f0 + f1) / 2
             time_vals.append(t)
             theta_vals.append(th0)
             omega_vals.append(w)
-            ff = f * profile.mag(w)
-            force_vals.append(ff)
+            force_vals.append(f0)
             potential_vals.append(self.potential(th0))
             kappa_vals.append(self.kappa)
 
-            _ = Pendulum.delta_t(self.L, self.kappa, w, ff * step, step)
-            w_avg = w - step / 2
-            if w_avg < 0:
-                w_avg = w / 2
-            ff = f * profile.mag(w_avg)
-            th1 = self.theta(w)  # TODO - interpolate ??
-            dtheta = th1 - th0
-            dt = dtheta / w_avg
+            assert f_avg >= 0, f"Invalid f_avg: {f_avg}"
+            th1, dt, done = Pendulum.delta_t(self.L, self.kappa, w, f_avg * step, step)
             t += dt
-            self.kappa -= ff * step
+            self.kappa += f_avg * step
             th0 = th1
+            w += step
 
         plot_data = (
             np.array(
@@ -726,6 +725,8 @@ def main():
     print("graded pull forces")
     for force in [0.0, 0.002, 0.004, 0.008, 0.016]:
         cons.pull(hunting_down_kappa, force, prof, True, 0.01)
+        t, e, _ = cons.check(cons.kappa, force, prof, True, step=0.01)
+        print(f"Force: {force:.3}  Energy: {e:.4}  Interval: {1.098 + t:.4}")
     # for force in [0.0, 0.002, 0.004, 0.008, 0.016]:
     #     cons.pull(1.998, force, prof, True, step=0.001)
 
