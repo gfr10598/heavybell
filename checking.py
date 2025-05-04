@@ -65,6 +65,9 @@ class Profile:
         #     raise ValueError(f"Invalid range: {self.raw_range[0]} {self.raw_range[1]}")
 
     def shape(self, w_shape: float, f_shape: float) -> Self:
+        assert w_shape > 0 and f_shape > 0, f"Invalid shape: {w_shape} {f_shape}"
+        assert w_shape >= 0.4, f"Invalid shape: {w_shape} {f_shape}"
+
         self.w_shape = w_shape
         w_range = (self.raw_range[0] ** w_shape, self.raw_range[1] ** w_shape)
         self.w_center = (w_range[0] + w_range[1]) / 2
@@ -142,7 +145,11 @@ class Profile:
     def mag(self, w: float) -> float:
         if self.w_shape != 1.0:
             # BUG - this is sometimes throwing a warning.
-            w = w**self.w_shape
+            try:
+                w = w**self.w_shape
+            except RuntimeWarning:
+                print(f"Invalid w: {w} {self.w_shape}")
+                raise
         q = 1 - ((w - self.w_center) / self.w_width) ** 2
         return math.pow(q, self.f_shape) if q > 0 else 0.0
 
@@ -402,7 +409,7 @@ class Conserving:
         potential_vals.append(self.potential(th0))
         kappa_vals.append(self.kappa)
 
-        plot_data = (
+        plot_data: np.ndarray | None = (
             np.array(
                 [
                     time_vals,
@@ -541,17 +548,24 @@ class Conserving:
             t += dt
             w0 = w1
 
+        np_time = np.array(time_vals)
         if plot:
             np_time = np.array(time_vals)
             # add reversed time to end of time vector
-            np_time = np_time + (2 * np_time[-1] - np_time[::-1])
+            np_time = np.concatenate([np_time, 2 * np_time[-1] - np_time[::-1]])
             theta_vals = theta_vals + theta_vals[::-1]
             omega_vals = omega_vals + omega_vals[::-1]
             force_vals = force_vals + force_vals[::-1]
             potential_vals = potential_vals + potential_vals[::-1]
 
+        print(np_time.shape, len(theta_vals), len(omega_vals), len(force_vals))
         plot_data = np.array(
-            [time_vals, potential_vals, np.degrees(theta_vals), force_vals]
+            [
+                np_time,
+                np.array(potential_vals),
+                np.degrees(theta_vals),
+                np.array(force_vals),
+            ]
         )
         return (2 * t, self.kappa / 2, 0.0 if first is None else t - first, plot_data)
 
@@ -719,7 +733,7 @@ def main():
     print(f"Hunting down Energy: {hunting_down_kappa/2:.4}")
     # TODO - changes to this profile make a big difference in the delay,
     # and a small difference in the energy.
-    prof = Profile((0.1, 4.0)).shape(0.1, 2.0)
+    prof = Profile((0.1, 4.0)).shape(0.5, 2.0)
     if False:
         rounds_kappa = kappa_for(base)
         amp, p, _, _, _ = cons.find_check(rounds_kappa, 7 / 8, 2.0)
@@ -762,59 +776,97 @@ def main():
         half, hue, _ = cons.pull(hunting_down_kappa + 0.004, 0.003, prof, True)
 
     print("graded pull forces")
-    for force in [0.0, 0.002, 0.004, 0.008, 0.016]:
-        _, peak, pull_data = cons.pull(hunting_down_kappa, force, prof, True, 0.001)
-        t, end, check_data = cons.check(cons.kappa, force, prof, True, step=0.001)
+    force = 2 * 0.016
+    plt.figure(figsize=(12, 6))
+    plt.title("Pulling")
+    plt.xlim(180, 90)
+    for shape in [0.5, 1.0, 1.5, 2.0, 5.0]:
+        prof = Profile((0.2, 4.3)).shape(shape, 0.7)
+        cons.set_height(hunting_down_kappa + 0.01)
+        plt_th = []
+        plt_f = []
+        for w in np.linspace(0.0, 6.0, 100):
+            plt_th.append(cons.theta(w))
+            plt_f.append(prof.mag(w))
+
+        # for force in [0.0, 0.002, 0.004, 0.008, 0.016]:
+        t, peak, pull_data = cons.pull(
+            hunting_down_kappa, force / prof.area(), prof, True, 0.001
+        )
+        plt.plot(
+            np.degrees(plt_th),
+            np.array(plt_f) / prof.area(),
+            label=f"shape: {shape:.2} interval: {t:.4}",
+        )
+        t, end, check_data = cons.check(
+            cons.kappa, force / prof.area(), prof, True, step=0.001
+        )
         print(
             f"Force: {force:.3}  Energy: {end:.4}  Interval: {1.098 + t:.5}"
             f" (({peak-end:.6}))"
         )
-        # with np.printoptions(precision=5, suppress=True):
-        #     print(pull_data[5], check_data[5][::-1])
+    plt.legend()
+    plt.show()
+    # with np.printoptions(precision=5, suppress=True):
+    #     print(pull_data[5], check_data[5][::-1])
     # for force in [0.0, 0.002, 0.004, 0.008, 0.016]:
     #     cons.pull(1.998, force, prof, True, step=0.001)
+    print("\n")
+    prof = Profile((0.2, 3.0)).shape(1.5, 1.0)
+    for force in [0.0, 0.004, 0.008, 0.016, 0.032]:
+        t, peak, pull_data = cons.pull(
+            hunting_down_kappa, force / prof.area(), prof, True, 0.01
+        )
+        t, end, check_data = cons.check(
+            cons.kappa, force / prof.area(), prof, True, step=0.01
+        )
+        print(
+            f"Force: {force:.3}  Energy: {end:.4}  Interval: {1.098 + t:.5}"
+            f" (({peak-end:.6}))"
+        )
 
     # We end up requiring a force of 0.015 for the check and pull for hunting down, so that
     # we have enough margin to pull the stroke in 2nd place to set up for the point lead.
     _, _, data = cons.check(1.97, 0.01, prof, True)
-    return
 
-    profiles = [
-        Profile((1.0, 4.0)).shape(0.5, 0.8),
-        Profile((0.2, 4.0)).shape(0.8, 0.5),
-        Profile((1.0, 4.0)).shape(0.9, 0.9),
-        Profile((1.0, 4.0)).shape(0.2, 2.0),
-        Profile((0.1, 4.0)).shape(0.2, 2.0),
-        Profile((0.1, 4.0)).shape(0.2, 1.5),
-    ]
-    check = True
-    for profile in profiles:
-        f = profile.transfer(1.97, 1.92)
-        if check:
-            _, _, data = cons.check(1.97, f, profile, True)
-        else:
-            _, _, data = cons.pull(1.92, f, profile, True)
-        print(
-            f"E = [{data[1,0]/2:.4} - {data[1,-1]/2:.4}], Raise = {(data[1,0]-data[1,-1])/2:.4}"
-            f"  Period={2*data[0,-1]:.4}  Profile Area:{profile.area():0.4}"
-        )
-        plt.figure(figsize=(12, 6))
-        plt.title("Check or Pull")
-        plt.ylim(0, 1)
-        plt.xlim(0, data[0][-1])
-        if check:
-            plt.title("Checking")
-        else:
-            plt.title("Pulling")
-        # plt.ylabel("Theta (degrees)")
-        plt.plot(data[0], 10 * (1 - data[1] / 2), label="10x delta E", linewidth=0.5)
-        plt.plot(data[0], data[2], label="PE", linewidth=0.5)
-        plt.plot(data[0], 10 * data[4], label="rope force", linewidth=0.5)
-        plt.legend()
-        mplcursors.cursor(hover=True)
-        plt.show()
+    if False:
+        profiles = [
+            Profile((1.0, 4.0)).shape(0.5, 0.8),
+            Profile((0.2, 4.0)).shape(0.8, 0.5),
+            Profile((1.0, 4.0)).shape(0.9, 0.9),
+            Profile((1.0, 4.0)).shape(0.2, 2.0),
+            Profile((0.1, 4.0)).shape(0.2, 2.0),
+            Profile((0.1, 4.0)).shape(0.2, 1.5),
+        ]
+        check = True
+        for profile in profiles:
+            f = profile.transfer(1.97, 1.92)
+            if check:
+                _, _, data = cons.check(1.97, f, profile, True)
+            else:
+                _, _, data = cons.pull(1.92, f, profile, True)
+            print(
+                f"E = [{data[1,0]/2:.4} - {data[1,-1]/2:.4}], Raise = {(data[1,0]-data[1,-1])/2:.4}"
+                f"  Period={2*data[0,-1]:.4}  Profile Area:{profile.area():0.4}"
+            )
+            plt.figure(figsize=(12, 6))
+            plt.title("Check or Pull")
+            plt.ylim(0, 1)
+            plt.xlim(0, data[0][-1])
+            if check:
+                plt.title("Checking")
+            else:
+                plt.title("Pulling")
+            # plt.ylabel("Theta (degrees)")
+            plt.plot(
+                data[0], 10 * (1 - data[1] / 2), label="10x delta E", linewidth=0.5
+            )
+            plt.plot(data[0], data[2], label="PE", linewidth=0.5)
+            plt.plot(data[0], 10 * data[4], label="rope force", linewidth=0.5)
+            plt.legend()
+            mplcursors.cursor(hover=True)
+            plt.show()
 
-    return
     hand_and_back()
     compare_checking(1.985, 8, True)
 
