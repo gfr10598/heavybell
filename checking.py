@@ -305,7 +305,9 @@ class Conserving:
         return self.kappa / 2 - self.potential(theta)
 
     def omega(self, theta: float) -> float:
-        return 2 * np.sqrt(9.81 * self.kinetic(theta) / self.L)
+        k = self.kinetic(theta)
+        assert k >= 0, f"Invalid kinetic: {k} {theta}"
+        return 2 * np.sqrt(9.81 * k / self.L)
 
     def omega_bdc(self) -> float:
         return Pendulum.omega_bdc(self.L, self.kappa)
@@ -522,12 +524,19 @@ class Conserving:
             while self.kinetic(theta + dtheta) < 0.98 * self.kinetic(theta):
                 dtheta /= 2
 
-            force = (a - b * (w0 - offset) ** 2) if abs(w0 - offset) < threshold else 0
+            # For large forces, this can reduce kappa such that kinetic is negative.
+            while True:
+                force = (
+                    (a - b * (w0 - offset) ** 2) if abs(w0 - offset) < threshold else 0
+                )
+                self.kappa -= force * dtheta
+                if self.kinetic(theta + dtheta) > 0:
+                    break
+                self.kappa += force * dtheta
+                dtheta /= 2
+
             if first is None and force > 0:
                 first = t
-
-            self.kappa -= force * dtheta
-            self.kappa = max(self.kappa, 0)
 
             if plot:
                 time_vals.append(t)
@@ -540,9 +549,10 @@ class Conserving:
             theta += dtheta
             w1 = self.omega(theta)
             dt = dtheta / ((w0 + w1) / 2)
+            assert math.isfinite(dt), f"Invalid dt: {dt} {w0} {w1} {dtheta}"
             dwdt = (w1 - w0) / dt
             if abs(dwdt) < 0.9 * abs(last_dwdt):
-                print(f"Stopping at {t} {theta} {w0} {dwdt} {last_dwdt}")
+                assert False, f"Problem at {t} {theta} {w0} {dwdt} {last_dwdt}"
                 break
             last_dwdt = dwdt
             t += dt
@@ -558,7 +568,6 @@ class Conserving:
             force_vals = force_vals + force_vals[::-1]
             potential_vals = potential_vals + potential_vals[::-1]
 
-        print(np_time.shape, len(theta_vals), len(omega_vals), len(force_vals))
         plot_data = np.array(
             [
                 np_time,
@@ -580,82 +589,119 @@ class Conserving:
             raise ValueError(f"kappa/2 != e: {kappa/2} {e}")
         target = base * fraction
         a = 0.0
-        b = 5.0
+        b = 10.0
         while abs(b - a) > 0.00001:
             amp = (a + b) / 2
             period, e_peak, check, theta = self.check_and_pull(kappa, amp, amp / spread)
+            # print(f"{a:.5} {amp:.5} {b:.5} => {period:.4} {target:.4} ")
             if period < target:
                 b = amp
             else:
                 a = amp
 
+        print(f"base = {base:.4}  fraction = {fraction:.4}  target = {target:.4}")
         print(
             f"Found\t{base:.04}\t{kappa/2:.05}\t{amp:.05}\t{period:.04}\t"
             f"{e_peak:.05}\t{e-e_peak:.04}\t{check:.03}"
         )
+        assert math.isclose(
+            period, target, rel_tol=1e-3
+        ), f"Target not matched: {period:.6} != {target:.6}"
         # self.check_and_pull(kappa, amp, amp/spread)
         return (amp, period, e_peak, e - e_peak, check)
 
 
 def compare_checking(kappa: float, n: int, plot: bool = False) -> None:
     cons = Conserving(0.996, 12000.0, 0.0, 0.0)
-    base, e_unchecked, _, unchecked = cons.check_and_pull(kappa, 0, 1, True)
+    base, e_rounds, _, rounds = cons.check_and_pull(kappa, 0, 1, True)
+    p_down = base * (n - 1) / n
+    p_up = base * (n + 1) / n
     kappa_base = kappa_for(base)
-    kappa_down = kappa_for(base * (n - 1) / n)
+    kappa_up = kappa_for(p_up)
+    _, e_up, _, up = cons.check_and_pull(kappa_up, 0, 1, True)
+    kappa_down = kappa_for(p_down)
     print(
         f"n: {n} base: {base:.3}  e_base: {kappa_base / 2:.5} e_down: {kappa_down / 2:.5}"
     )
-    impulse_force, _, _, _, _ = cons.find_check(kappa_base, (n - 1) / n, 0.1)
+    print(f"(n-1)/(n+1): {p_down/p_up:.4}")
+    impulse_force, period, _, _, _ = cons.find_check(kappa_up, p_down / p_up, 0.2)
+    assert math.isclose(
+        period, p_down, rel_tol=1e-3
+    ), f"Invalid period: {period} {p_down}"
 
     period, e_impulse, check, impulse = cons.check_and_pull(
-        kappa_base, impulse_force, impulse_force / 0.1, True
+        kappa_up, impulse_force, impulse_force / 0.2, True
     )
+    width = 7  # 5.3
     # period, e_typical, check, typical = cons.check_and_pull(kappa_b, 0.0867, 0.0867/2.0, True)
     # 6.0	Found	2.448	0.9925	0.04692	2.142	0.9848	0.007671	0.566
-    typical_force, _, _, _, _ = cons.find_check(kappa_base, 7 / 8, 5.3)
+    typical_force, _, _, _, _ = cons.find_check(kappa_up, p_down / p_up, width)
     period, e_typical, check, typical = cons.check_and_pull(
-        kappa_base, typical_force, typical_force / 5.32, True
-    )  # Spread HACK - WHY?
-    period, e_natural, check, natural = cons.check_and_pull(kappa_down, 0, 1, True)
-    print(
-        f"Intervals: {unchecked[0, -1]:.4}, {impulse[0, -1]:.4}, {typical[0, -1]:.4},"
-        f" {natural[0, -1]:.4}"
+        kappa_up, typical_force, typical_force / width, True
     )
-    print(f"Energies: {e_unchecked:.5}  {e_impulse:.5}  {e_typical:.5}  {e_natural:.5}")
-    print(f"{e_unchecked - e_typical:.4} vs {e_unchecked - e_natural:.4}")
-    print(f"{(e_unchecked - e_typical) / (e_unchecked - e_natural):.4}")
+    assert math.isclose(
+        period, p_down, rel_tol=1e-3
+    ), f"Invalid period: {period} {p_down}"
+
+    period, e_down, check, down = cons.check_and_pull(kappa_down, 0, 1, True)
+    print(
+        f"Intervals: {up[0,-1]:.4}, {rounds[0, -1]:.4}, {impulse[0, -1]:.4}, {typical[0, -1]:.4},"
+        f" {down[0, -1]:.4}"
+    )
+    print(
+        f"Energies: {e_up:.5} {e_rounds:.5}  {e_impulse:.5}  {e_typical:.5}  {e_down:.5}"
+    )
+    print(
+        f"Check and pull: {100*(e_up - e_typical):.4}% vs Full Delta: {100*(e_up - e_down):.4}%"
+    )
+    print(
+        f"Check and pull requires {100.0 * (e_up - e_typical) / (e_up - e_down):.4}"
+        f"% of energy delta"
+    )
 
     if plot:
         plt.figure(figsize=(12, 6))
-        plt.ylim(0.9, 1.0)
-        plt.xlim(0.7, 1.7)
+        plt.ylim(0.8, 1.0)
+        plt.xlim(0.4, 2.3)
+        plt.title("Hunting up, down(*), and dodging")
+        plt.xlabel("Time (seconds)")
         plt.ylabel("Potential Energy")
-        plt.plot(unchecked[0], unchecked[1], label="unchecked", linewidth=0.5)
-        plt.plot(impulse[0], impulse[1], label="impulse", linewidth=0.5)
-        plt.plot(typical[0], typical[1], label="typical", linewidth=0.5)
-        plt.plot(natural[0], natural[1], label="natural", linewidth=0.5)
+        plt.plot(up[0], up[1], label="up", linewidth=0.8)
+        plt.plot(rounds[0], rounds[1], label="rounds", linewidth=0.8)
+        plt.plot(down[0], down[1], label="down", linewidth=0.8)
+        # plt.plot(place[0], place[1], label="rounds", linewidth=0.8)
+        plt.plot(impulse[0], impulse[1], label="impulse", linewidth=0.8)
+        plt.plot(typical[0], typical[1], label="dodge", linewidth=0.8)
         plt.legend()
+        plt.grid(True, "both", "both")
+        mplcursors.cursor(hover=True)
         plt.show()
 
         plt.figure(figsize=(12, 6))
         plt.ylim(90, 180)
         plt.ylabel("Theta (degrees)")
-        plt.plot(unchecked[0], unchecked[2], label="unchecked", linewidth=0.5)
+        plt.plot(up[0], up[2], label="up", linewidth=0.8)
+        plt.plot(rounds[0], rounds[2], label="rounds", linewidth=0.5)
         plt.plot(impulse[0], impulse[2], label="impulse", linewidth=0.5)
         plt.plot(typical[0], typical[2], label="typical", linewidth=0.5)
-        plt.plot(natural[0], natural[2], label="natural", linewidth=0.5)
+        plt.plot(down[0], down[2], label="natural", linewidth=0.5)
         plt.legend()
+        plt.grid(True, "both", "both")
+        mplcursors.cursor(hover=True)
         plt.show()
 
         plt.figure(figsize=(12, 6))
         plt.ylim(0, 180)
         plt.ylabel("Theta (degrees)")
-        plt.plot(unchecked[0], unchecked[2], label="unchecked", linewidth=0.5)
+        plt.plot(up[0], up[2], label="up", linewidth=0.5)
+        plt.plot(rounds[0], rounds[2], label="rounds", linewidth=0.5)
         plt.plot(impulse[0], impulse[2], label="impulse", linewidth=0.5)
         plt.plot(typical[0], typical[2], label="typical", linewidth=0.5)
-        plt.plot(natural[0], natural[2], label="natural", linewidth=0.5)
+        plt.plot(down[0], down[2], label="down", linewidth=0.5)
         plt.plot(typical[0], 1000 * typical[3], label="rope force", linewidth=0.5)
         plt.legend()
+        plt.grid(True, "both", "both")
+        mplcursors.cursor(hover=True)
         plt.show()
 
 
