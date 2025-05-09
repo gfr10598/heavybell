@@ -42,6 +42,7 @@ from typing import Tuple, Self
 from numpy.typing import NDArray
 
 import numpy as np
+import pandas as pd
 import matplotlib.pyplot as plt
 import mplcursors  # type: ignore
 from functools import lru_cache
@@ -299,15 +300,15 @@ class Conserving:
         self.kappa = kappa
 
     def potential(self, theta: float) -> float:
-        return (1 - np.cos(theta)) / 2
+        return (1.0 - np.cos(theta)) / 2.0
 
     def kinetic(self, theta: float) -> float:
-        return self.kappa / 2 - self.potential(theta)
+        return self.kappa / 2.0 - self.potential(theta)
 
     def omega(self, theta: float) -> float:
         k = self.kinetic(theta)
         assert k >= 0, f"Invalid kinetic: {k} {theta}"
-        return 2 * np.sqrt(9.81 * k / self.L)
+        return 2.0 * np.sqrt(9.81 * k / self.L)
 
     def omega_bdc(self) -> float:
         return Pendulum.omega_bdc(self.L, self.kappa)
@@ -498,14 +499,13 @@ class Conserving:
         self, kappa: float, a: float, b: float, plot: bool = False, offset: float = 0.0
     ) -> Tuple[float, float, float, NDArray]:
         """
-        Returns: the period, energy, check time
+        Returns: the period, energy, check time, and plot data [t, PE, Theta, F, w, wdot, kappa]
         """
         self.set_height(kappa)
         t = 0.0
         theta = 0.0
-        dtheta = 0.1
+        dtheta = 0.01  # radians
         w0 = self.omega(theta)
-        last_dwdt = 0.0
         threshold = math.sqrt(a / b)
         first = None
         count = 0
@@ -516,12 +516,14 @@ class Conserving:
         force_vals = []
         potential_vals = []
         kappa_vals = []
+        odot_vals = []
+        dt_vals = []
 
         while w0 > 0 and self.kinetic(theta) > 1e-7:
             count += 1
             # if w0 < .1:
             #   print(t, dt, theta, dtheta,  w0)
-            while self.kinetic(theta + dtheta) < 0.98 * self.kinetic(theta):
+            while self.kinetic(theta + dtheta) < 0.99 * self.kinetic(theta):
                 dtheta /= 2
 
             # For large forces, this can reduce kappa such that kinetic is negative.
@@ -532,11 +534,17 @@ class Conserving:
                 self.kappa -= force * dtheta
                 if self.kinetic(theta + dtheta) > 0:
                     break
+                # Restore and retry
                 self.kappa += force * dtheta
                 dtheta /= 2
 
             if first is None and force > 0:
                 first = t
+            w1 = self.omega(theta + dtheta)
+
+            dt = dtheta / ((w0 + w1) / 2)
+            assert math.isfinite(dt), f"Invalid dt: {dt} {w0} {w1} {dtheta}"
+            dwdt = (w1 - w0) / dt
 
             if plot:
                 time_vals.append(t)
@@ -545,16 +553,10 @@ class Conserving:
                 force_vals.append(force)
                 potential_vals.append(self.potential(theta))
                 kappa_vals.append(self.kappa)
+                odot_vals.append(dwdt)
+                dt_vals.append(dtheta)
 
             theta += dtheta
-            w1 = self.omega(theta)
-            dt = dtheta / ((w0 + w1) / 2)
-            assert math.isfinite(dt), f"Invalid dt: {dt} {w0} {w1} {dtheta}"
-            dwdt = (w1 - w0) / dt
-            if abs(dwdt) < 0.9 * abs(last_dwdt):
-                assert False, f"Problem at {t} {theta} {w0} {dwdt} {last_dwdt}"
-                break
-            last_dwdt = dwdt
             t += dt
             w0 = w1
 
@@ -564,9 +566,14 @@ class Conserving:
             # add reversed time to end of time vector
             np_time = np.concatenate([np_time, 2 * np_time[-1] - np_time[::-1]])
             theta_vals = theta_vals + theta_vals[::-1]
-            omega_vals = omega_vals + omega_vals[::-1]
+            omega_vals = np.concatenate(
+                [np.array(omega_vals), -np.array(omega_vals[::-1])]
+            )
+            odot_vals = odot_vals + odot_vals[::-1]
+            kappa_vals = kappa_vals + kappa_vals[::-1]
             force_vals = force_vals + force_vals[::-1]
             potential_vals = potential_vals + potential_vals[::-1]
+            dt_vals = dt_vals + dt_vals[::-1]
 
         plot_data = np.array(
             [
@@ -574,6 +581,10 @@ class Conserving:
                 np.array(potential_vals),
                 np.degrees(theta_vals),
                 np.array(force_vals),
+                np.array(omega_vals),
+                np.array(odot_vals),
+                np.array(kappa_vals),
+                np.array(dt_vals),
             ]
         )
         return (2 * t, self.kappa / 2, 0.0 if first is None else t - first, plot_data)
@@ -589,11 +600,11 @@ class Conserving:
             raise ValueError(f"kappa/2 != e: {kappa/2} {e}")
         target = base * fraction
         a = 0.0
-        b = 10.0
+        b = 150.0
         while abs(b - a) > 0.00001:
             amp = (a + b) / 2
             period, e_peak, check, theta = self.check_and_pull(kappa, amp, amp / spread)
-            # print(f"{a:.5} {amp:.5} {b:.5} => {period:.4} {target:.4} ")
+            # print(f"{a:.6} {amp:.6} {b:.6} => {period:.4} {target:.4} ")
             if period < target:
                 b = amp
             else:
@@ -604,6 +615,8 @@ class Conserving:
             f"Found\t{base:.04}\t{kappa/2:.05}\t{amp:.05}\t{period:.04}\t"
             f"{e_peak:.05}\t{e-e_peak:.04}\t{check:.03}"
         )
+        # For very large energy, the pull has to start at higher omega,
+        # or it will already be too late.
         assert math.isclose(
             period, target, rel_tol=1e-3
         ), f"Target not matched: {period:.6} != {target:.6}"
@@ -611,7 +624,9 @@ class Conserving:
         return (amp, period, e_peak, e - e_peak, check)
 
 
-def compare_checking(kappa: float, n: int, plot: bool = False) -> None:
+def compare_checking(
+    kappa: float, n: int, plot: bool = False, impulse_spread: float = 0.2
+) -> None:
     cons = Conserving(0.996, 12000.0, 0.0, 0.0)
     base, e_rounds, _, rounds = cons.check_and_pull(kappa, 0, 1, True)
     p_down = base * (n - 1) / n
@@ -624,13 +639,15 @@ def compare_checking(kappa: float, n: int, plot: bool = False) -> None:
         f"n: {n} base: {base:.3}  e_base: {kappa_base / 2:.5} e_down: {kappa_down / 2:.5}"
     )
     print(f"(n-1)/(n+1): {p_down/p_up:.4}")
-    impulse_force, period, _, _, _ = cons.find_check(kappa_up, p_down / p_up, 0.2)
+    impulse_force, period, _, _, _ = cons.find_check(
+        kappa_up, p_down / p_up, impulse_spread
+    )
     assert math.isclose(
         period, p_down, rel_tol=1e-3
     ), f"Invalid period: {period} {p_down}"
 
     period, e_impulse, check, impulse = cons.check_and_pull(
-        kappa_up, impulse_force, impulse_force / 0.2, True
+        kappa_up, impulse_force, impulse_force / impulse_spread, True
     )
     width = 7  # 5.3
     # period, e_typical, check, typical = cons.check_and_pull(kappa_b, 0.0867, 0.0867/2.0, True)
@@ -660,24 +677,49 @@ def compare_checking(kappa: float, n: int, plot: bool = False) -> None:
     )
 
     if plot:
+        for limits in [[[0.4, 2.3], [0.9, 1.0]], [[0.0, 2.8], [0.0, 1.0]]]:
+            plt.figure(figsize=(12, 6))
+            plt.xlim(limits[0])
+            plt.ylim(limits[1])
+            plt.title(
+                f"Hunting up, down(*), and dodging at {180-np.max(rounds[2]):.3} below balance"
+            )
+            plt.xlabel("Time (seconds)")
+            plt.ylabel("Potential Energy")
+            plt.plot(up[0], up[1], label="up", linewidth=0.8)
+            plt.plot(rounds[0], rounds[1], label="rounds", linewidth=0.8)
+            plt.plot(down[0], down[1], label="down", linewidth=0.8)
+            # plt.plot(place[0], place[1], label="rounds", linewidth=0.8)
+            plt.plot(impulse[0], impulse[1], label="impulse", linewidth=0.8)
+            plt.plot(typical[0], typical[1], label="dodge", linewidth=0.8)
+            if limits[0][0] == 0.0:
+                plt.plot(impulse[0], 0.5 * impulse[3], label="impulse", linewidth=0.5)
+                plt.plot(typical[0], 10 * typical[3], label="practical", linewidth=0.8)
+            plt.legend()
+            plt.grid(True, "both", "both")
+            mplcursors.cursor(hover=True)
+            plt.show()
+
         plt.figure(figsize=(12, 6))
-        plt.ylim(0.8, 1.0)
-        plt.xlim(0.4, 2.3)
-        plt.title("Hunting up, down(*), and dodging")
-        plt.xlabel("Time (seconds)")
-        plt.ylabel("Potential Energy")
-        plt.plot(up[0], up[1], label="up", linewidth=0.8)
-        plt.plot(rounds[0], rounds[1], label="rounds", linewidth=0.8)
-        plt.plot(down[0], down[1], label="down", linewidth=0.8)
-        # plt.plot(place[0], place[1], label="rounds", linewidth=0.8)
-        plt.plot(impulse[0], impulse[1], label="impulse", linewidth=0.8)
-        plt.plot(typical[0], typical[1], label="dodge", linewidth=0.8)
+        plt.title(
+            f"Hunting up, down(*), and dodging at {180-np.max(rounds[2]):.3} below balance"
+        )
+        plt.xlabel("Omega (radians/sec)")
+        plt.ylabel("Omega Dot (radians/sec^2)")
+        plt.plot(up[4], up[5], label="up", linewidth=0.8)
+        plt.plot(rounds[4], rounds[5], label="rounds", linewidth=0.8)
+        plt.plot(down[4], down[5], label="down", linewidth=0.8)
+        # plt.plot(impulse[4], impulse[5], label="impulse", linewidth=0.8)
+        plt.plot(typical[4], typical[5], label="typical", linewidth=0.8)
         plt.legend()
         plt.grid(True, "both", "both")
         mplcursors.cursor(hover=True)
         plt.show()
 
         plt.figure(figsize=(12, 6))
+        plt.title(
+            f"Hunting up, down(*), and dodging at {180-np.max(rounds[2]):.3} below balance"
+        )
         plt.ylim(90, 180)
         plt.ylabel("Theta (degrees)")
         plt.plot(up[0], up[2], label="up", linewidth=0.8)
@@ -691,6 +733,9 @@ def compare_checking(kappa: float, n: int, plot: bool = False) -> None:
         plt.show()
 
         plt.figure(figsize=(12, 6))
+        plt.title(
+            f"Hunting up, down(*), and dodging at {180-np.max(rounds[2]):.3} below balance"
+        )
         plt.ylim(0, 180)
         plt.ylabel("Theta (degrees)")
         plt.plot(up[0], up[2], label="up", linewidth=0.5)
@@ -914,7 +959,9 @@ def main():
             plt.show()
 
     hand_and_back()
-    compare_checking(1.985, 8, True)
+    compare_checking(1.985, 8, True, impulse_spread=0.2)
+    # Faster peal speed
+    compare_checking(1.975, 8, True, impulse_spread=0.25)
 
 
 if __name__ == "__main__":
