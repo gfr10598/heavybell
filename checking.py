@@ -853,7 +853,7 @@ def main():
     # TODO - changes to this profile make a big difference in the delay,
     # and a small difference in the energy.
     prof = Profile((0.1, 4.0)).shape(0.5, 2.0)
-    if False:
+    if True:
         rounds_kappa = kappa_for(base)
         amp, p, _, _, _ = cons.find_check(rounds_kappa, 7 / 8, 2.0)
         te = kappa_for(p + 0.09) / 2
@@ -948,14 +948,14 @@ def main():
     # we have enough margin to pull the stroke in 2nd place to set up for the point lead.
     _, _, data = cons.check(1.97, 0.01, prof, True)
 
-    if False:
+    if True:
         profiles = [
             Profile((1.0, 4.0)).shape(0.5, 0.8),
             Profile((0.2, 4.0)).shape(0.8, 0.5),
             Profile((1.0, 4.0)).shape(0.9, 0.9),
-            Profile((1.0, 4.0)).shape(0.2, 2.0),
-            Profile((0.1, 4.0)).shape(0.2, 2.0),
-            Profile((0.1, 4.0)).shape(0.2, 1.5),
+            Profile((1.0, 4.0)).shape(0.4, 2.0),
+            Profile((0.1, 4.0)).shape(0.4, 2.0),
+            Profile((0.1, 4.0)).shape(0.4, 1.5),
         ]
         check = True
         for profile in profiles:
