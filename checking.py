@@ -497,9 +497,9 @@ class Conserving:
 
     def check_and_pull(
         self, kappa: float, a: float, b: float, plot: bool = False, offset: float = 0.0
-    ) -> Tuple[float, float, float, NDArray]:
+    ) -> Tuple[float, float, float, pd.DataFrame]:
         """
-        Returns: the period, energy, check time, and plot data [t, PE, Theta, F, w, wdot, kappa]
+        Returns: the period, energy, check time, and plot data as a pandas DataFrame
         """
         self.set_height(kappa)
         t = 0.0
@@ -529,7 +529,10 @@ class Conserving:
             # For large forces, this can reduce kappa such that kinetic is negative.
             while True:
                 force = (
-                    (a - b * (w0 - offset) ** 2) if abs(w0 - offset) < threshold else 0
+                    # a * np.sqrt(1 - b / a * (w0 - offset) ** 2)
+                    (a - b * (w0 - offset) ** 2) ** 2
+                    if abs(w0 - offset) < threshold
+                    else 0
                 )
                 self.kappa -= force * dtheta
                 if self.kinetic(theta + dtheta) > 0:
@@ -575,17 +578,17 @@ class Conserving:
             potential_vals = potential_vals + potential_vals[::-1]
             dt_vals = dt_vals + dt_vals[::-1]
 
-        plot_data = np.array(
-            [
-                np_time,
-                np.array(potential_vals),
-                np.degrees(theta_vals),
-                np.array(force_vals),
-                np.array(omega_vals),
-                np.array(odot_vals),
-                np.array(kappa_vals),
-                np.array(dt_vals),
-            ]
+        plot_data = pd.DataFrame(
+            {
+                "time": np_time,
+                "potential": potential_vals,
+                "theta": np.degrees(theta_vals),
+                "force": force_vals,
+                "omega": omega_vals,
+                "omega_dot": odot_vals,
+                "kappa": kappa_vals,
+                "delta_theta": dt_vals,
+            }
         )
         return (2 * t, self.kappa / 2, 0.0 if first is None else t - first, plot_data)
 
@@ -662,8 +665,9 @@ def compare_checking(
 
     period, e_down, check, down = cons.check_and_pull(kappa_down, 0, 1, True)
     print(
-        f"Intervals: {up[0,-1]:.4}, {rounds[0, -1]:.4}, {impulse[0, -1]:.4}, {typical[0, -1]:.4},"
-        f" {down[0, -1]:.4}"
+        f"Intervals: {up['time'].iat[-1]:.4}, {rounds['time'].iat[-1]:.4},"
+        f" {impulse['time'].iat[-1]:.4}, {typical['time'].iat[-1]:.4},"
+        f" {down['time'].iat[-1]:.4}"
     )
     print(
         f"Energies: {e_up:.5} {e_rounds:.5}  {e_impulse:.5}  {e_typical:.5}  {e_down:.5}"
@@ -682,19 +686,42 @@ def compare_checking(
             plt.xlim(limits[0])
             plt.ylim(limits[1])
             plt.title(
-                f"Hunting up, down(*), and dodging at {180-np.max(rounds[2]):.3} below balance"
+                f"Hunting up, down(*), and dodging at {180-rounds['theta'].max():.3} below balance"
             )
             plt.xlabel("Time (seconds)")
             plt.ylabel("Potential Energy")
-            plt.plot(up[0], up[1], label="up", linewidth=0.8)
-            plt.plot(rounds[0], rounds[1], label="rounds", linewidth=0.8)
-            plt.plot(down[0], down[1], label="down", linewidth=0.8)
-            # plt.plot(place[0], place[1], label="rounds", linewidth=0.8)
-            plt.plot(impulse[0], impulse[1], label="impulse", linewidth=0.8)
-            plt.plot(typical[0], typical[1], label="dodge", linewidth=0.8)
+            plt.plot(up["time"], up["potential"], label="up", linewidth=0.8)
+            plt.plot(rounds["time"], rounds["potential"], label="rounds", linewidth=0.8)
+            plt.plot(down["time"], down["potential"], label="down", linewidth=0.8)
+            plt.plot(
+                impulse["time"], impulse["potential"], label="impulse", linewidth=0.8
+            )
+            plt.plot(
+                typical["time"], typical["potential"], label="dodge", linewidth=0.8
+            )
             if limits[0][0] == 0.0:
-                plt.plot(impulse[0], 0.5 * impulse[3], label="impulse", linewidth=0.5)
-                plt.plot(typical[0], 10 * typical[3], label="practical", linewidth=0.8)
+                plt.plot(
+                    impulse["time"],
+                    0.5 * impulse["force"],
+                    label="impulse",
+                    linewidth=0.8,
+                    linestyle="--",
+                )
+                plt.plot(
+                    typical["time"],
+                    10 * typical["force"],
+                    label="practical",
+                    linewidth=0.8,
+                    linestyle="--",
+                )
+            else:
+                plt.plot(up["time"], up["kappa"] / 2, label="energy up", linestyle="--")
+                plt.plot(
+                    down["time"],
+                    down["kappa"] / 2,
+                    label="energy down",
+                    linestyle="--",
+                )
             plt.legend()
             plt.grid(True, "both", "both")
             mplcursors.cursor(hover=True)
@@ -702,15 +729,14 @@ def compare_checking(
 
         plt.figure(figsize=(12, 6))
         plt.title(
-            f"Hunting up, down(*), and dodging at {180-np.max(rounds[2]):.3} below balance"
+            f"Hunting up, down(*), and dodging at {180-np.max(rounds['theta']):.3} below balance"
         )
         plt.xlabel("Omega (radians/sec)")
         plt.ylabel("Omega Dot (radians/sec^2)")
-        plt.plot(up[4], up[5], label="up", linewidth=0.8)
-        plt.plot(rounds[4], rounds[5], label="rounds", linewidth=0.8)
-        plt.plot(down[4], down[5], label="down", linewidth=0.8)
-        # plt.plot(impulse[4], impulse[5], label="impulse", linewidth=0.8)
-        plt.plot(typical[4], typical[5], label="typical", linewidth=0.8)
+        plt.plot(up["omega"], up["omega_dot"], label="up", linewidth=0.8)
+        plt.plot(rounds["omega"], rounds["omega_dot"], label="rounds", linewidth=0.8)
+        plt.plot(down["omega"], down["omega_dot"], label="down", linewidth=0.8)
+        plt.plot(typical["omega"], typical["omega_dot"], label="typical", linewidth=0.8)
         plt.legend()
         plt.grid(True, "both", "both")
         mplcursors.cursor(hover=True)
@@ -718,15 +744,15 @@ def compare_checking(
 
         plt.figure(figsize=(12, 6))
         plt.title(
-            f"Hunting up, down(*), and dodging at {180-np.max(rounds[2]):.3} below balance"
+            f"Hunting up, down(*), and dodging at {180-np.max(rounds['theta']):.3} below balance"
         )
         plt.ylim(90, 180)
         plt.ylabel("Theta (degrees)")
-        plt.plot(up[0], up[2], label="up", linewidth=0.8)
-        plt.plot(rounds[0], rounds[2], label="rounds", linewidth=0.5)
-        plt.plot(impulse[0], impulse[2], label="impulse", linewidth=0.5)
-        plt.plot(typical[0], typical[2], label="typical", linewidth=0.5)
-        plt.plot(down[0], down[2], label="natural", linewidth=0.5)
+        plt.plot(up["time"], up["theta"], label="up", linewidth=0.8)
+        plt.plot(rounds["time"], rounds["theta"], label="rounds", linewidth=0.5)
+        plt.plot(impulse["time"], impulse["theta"], label="impulse", linewidth=0.5)
+        plt.plot(typical["time"], typical["theta"], label="typical", linewidth=0.5)
+        plt.plot(down["time"], down["theta"], label="natural", linewidth=0.5)
         plt.legend()
         plt.grid(True, "both", "both")
         mplcursors.cursor(hover=True)
@@ -734,16 +760,18 @@ def compare_checking(
 
         plt.figure(figsize=(12, 6))
         plt.title(
-            f"Hunting up, down(*), and dodging at {180-np.max(rounds[2]):.3} below balance"
+            f"Hunting up, down(*), and dodging at {180-np.max(rounds['theta']):.3} below balance"
         )
         plt.ylim(0, 180)
         plt.ylabel("Theta (degrees)")
-        plt.plot(up[0], up[2], label="up", linewidth=0.5)
-        plt.plot(rounds[0], rounds[2], label="rounds", linewidth=0.5)
-        plt.plot(impulse[0], impulse[2], label="impulse", linewidth=0.5)
-        plt.plot(typical[0], typical[2], label="typical", linewidth=0.5)
-        plt.plot(down[0], down[2], label="down", linewidth=0.5)
-        plt.plot(typical[0], 1000 * typical[3], label="rope force", linewidth=0.5)
+        plt.plot(up["time"], up["theta"], label="up", linewidth=0.5)
+        plt.plot(rounds["time"], rounds["theta"], label="rounds", linewidth=0.5)
+        plt.plot(impulse["time"], impulse["theta"], label="impulse", linewidth=0.5)
+        plt.plot(typical["time"], typical["theta"], label="typical", linewidth=0.5)
+        plt.plot(down["time"], down["theta"], label="down", linewidth=0.5)
+        plt.plot(
+            typical["time"], 1000 * typical["force"], label="rope force", linewidth=0.5
+        )
         plt.legend()
         plt.grid(True, "both", "both")
         mplcursors.cursor(hover=True)
@@ -959,6 +987,9 @@ def main():
             plt.show()
 
     hand_and_back()
+    # Slower peal speed
+    # TODO - inject profile here
+    compare_checking(1.992, 8, True, impulse_spread=0.12)
     compare_checking(1.985, 8, True, impulse_spread=0.2)
     # Faster peal speed
     compare_checking(1.975, 8, True, impulse_spread=0.25)
